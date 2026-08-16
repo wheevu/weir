@@ -1,0 +1,4 @@
+build*/
+bench/results.*
+*.log
+.DS_Store
