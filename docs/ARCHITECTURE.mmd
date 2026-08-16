@@ -1,10 +1,10 @@
-```mermaid
 flowchart LR
-  C[Client TCP stream] --> P[Fragment-tolerant Parser]
-  P --> D[Durability queue\nbounded 256]
-  D --> L[Append + flush\nlocal log]
-  L --> Q[Processing queue\nbounded 256]
-  Q --> W[Worker threads]
-  M[Metrics registry] --> H[Metrics HTTP :9100]
-  S[Server epoll loop] --> P
-```
+  C["TCP clients"] --> E["epoll loop<br/>+ incremental parser"]
+  E --> D["Durability queue<br/>bounded 256"]
+  D --> L["Append-only log<br/>append + flush"]
+  L -->|completion| A["ACK queued"]
+  L --> Q["Processing queue<br/>bounded 256"]
+  Q --> W["Worker threads"]
+  Q --> R["Metrics registry"]
+  R --> M["Metrics endpoint<br/>HTTP :9100"]
+  M --> P["Prometheus"]

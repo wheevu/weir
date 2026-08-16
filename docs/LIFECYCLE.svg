@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="330" viewBox="0 0 1200 330" role="img" aria-labelledby="title desc">
+  <title id="title">Weir event lifecycle</title>
+  <desc id="desc">An event is received, validated, queued for persistence, appended and flushed, acknowledged, queued for processing, and processed. Invalid input is dropped and persistence failure returns an error without processing.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#93643a"/>
+    </marker>
+    <marker id="arrow-error" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#a14e42"/>
+    </marker>
+    <style>
+      .canvas { fill: #fbfaf7; }
+      .title { fill: #20262d; font: 700 27px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .subtitle { fill: #69727a; font: 15px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .node rect { fill: #ffffff; stroke: #2e3942; stroke-width: 2; rx: 11; }
+      .node .label { fill: #20262d; font: 700 15px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; text-anchor: middle; }
+      .node .number { fill: #93643a; font: 700 11px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .flow { fill: none; stroke: #93643a; stroke-width: 2.4; marker-end: url(#arrow); }
+      .error { fill: none; stroke: #a14e42; stroke-width: 2; stroke-dasharray: 6 5; marker-end: url(#arrow-error); }
+      .error-box rect { fill: #fff8f6; stroke: #a14e42; stroke-width: 2; rx: 11; }
+      .error-box .label { fill: #78382f; font: 700 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; text-anchor: middle; }
+      .note { fill: #4f5b63; font: 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    </style>
+  </defs>
+
+  <rect class="canvas" width="1200" height="330"/>
+  <text class="title" x="35" y="46">Event lifecycle</text>
+  <text class="subtitle" x="35" y="72">Persistence comes before processing, but the response is still queued on the network loop.</text>
+
+  <g class="node" transform="translate(35 125)">
+    <rect width="130" height="64"/>
+    <text class="number" x="14" y="23">01</text>
+    <text class="label" x="65" y="49">Received</text>
+  </g>
+  <g class="node" transform="translate(195 125)">
+    <rect width="130" height="64"/>
+    <text class="number" x="14" y="23">02</text>
+    <text class="label" x="65" y="49">Validated</text>
+  </g>
+  <g class="node" transform="translate(355 125)">
+    <rect width="145" height="64"/>
+    <text class="number" x="14" y="23">03</text>
+    <text class="label" x="72" y="49">Persistence queue</text>
+  </g>
+  <g class="node" transform="translate(530 125)">
+    <rect width="145" height="64"/>
+    <text class="number" x="14" y="23">04</text>
+    <text class="label" x="72" y="49">Append + flush</text>
+  </g>
+  <g class="node" transform="translate(705 125)">
+    <rect width="130" height="64"/>
+    <text class="number" x="14" y="23">05</text>
+    <text class="label" x="65" y="49">ACK queued</text>
+  </g>
+  <g class="node" transform="translate(865 125)">
+    <rect width="145" height="64"/>
+    <text class="number" x="14" y="23">06</text>
+    <text class="label" x="72" y="49">Processing queue</text>
+  </g>
+  <g class="node" transform="translate(1040 125)">
+    <rect width="125" height="64"/>
+    <text class="number" x="14" y="23">07</text>
+    <text class="label" x="62" y="49">Processed</text>
+  </g>
+
+  <path class="flow" d="M 165 157 H 195"/>
+  <path class="flow" d="M 325 157 H 355"/>
+  <path class="flow" d="M 500 157 H 530"/>
+  <path class="flow" d="M 675 157 H 705"/>
+  <path class="flow" d="M 835 157 H 865"/>
+  <path class="flow" d="M 1010 157 H 1040"/>
+
+  <g class="error-box" transform="translate(420 240)">
+    <rect width="160" height="60"/>
+    <text class="label" x="80" y="27">ERR persistence</text>
+    <text class="label" x="80" y="47">no processing</text>
+  </g>
+  <path class="error" d="M 603 189 C 603 220, 550 220, 500 240"/>
+
+  <g class="error-box" transform="translate(195 240)">
+    <rect width="130" height="60"/>
+    <text class="label" x="65" y="36">Dropped</text>
+  </g>
+  <path class="error" d="M 260 189 V 240"/>
+
+  <text class="note" x="35" y="320">Invalid input is dropped before admission.</text>
+  <text class="note" x="700" y="320">Baseline boundary: userspace flush, not fdatasync.</text>
+</svg>

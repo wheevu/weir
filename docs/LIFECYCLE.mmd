@@ -1,0 +1,9 @@
+flowchart LR
+  R["Received"] --> V["Validated"]
+  V --> Q["Persistence queue"]
+  Q --> A["Append + flush"]
+  A -->|success| K["ACK queued"]
+  K --> P["Processing queue"]
+  P --> W["Processed"]
+  A -->|failure| F["ERR persistence<br/>no processing"]
+  V -->|invalid| D["Dropped"]

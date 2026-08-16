@@ -2,6 +2,22 @@
 
 Weir is a small Linux-first C++20 event-ingestion service.
 
+**C++20** · **Linux** · **epoll** · **TCP** · **bounded concurrency** · **append-only persistence**
+
+![Weir architecture](docs/ARCHITECTURE.svg)
+
+*Design map only. Linux runtime verification is tracked separately from this baseline.*
+
+## What it demonstrates
+
+- Linux networking with nonblocking TCP and `epoll`
+- Incremental framing over a byte stream
+- Bounded queues and explicit backpressure
+- Persistence before processing acknowledgement
+- Worker ownership and coordinated shutdown
+- Append-only recovery and replay
+- Prometheus-compatible metrics and structured logs
+
 ## 30-second overview
 
 1. A TCP client sends length-delimited `WR01` frames.
@@ -13,6 +29,13 @@ Weir is a small Linux-first C++20 event-ingestion service.
 The service is intentionally single-process and has no runtime dependency beyond libc and pthreads.
 
 The lifecycle is validated, queued, durably appended, acknowledged, queued for processing, and handled by workers.
+
+## Event lifecycle
+
+![Weir event lifecycle](docs/LIFECYCLE.svg)
+
+The diagram labels the current baseline contract.
+The append step uses userspace `flush()`, not `fdatasync()`.
 
 ## Build
 
