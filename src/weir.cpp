@@ -41,8 +41,21 @@ std::vector<Event> Parser::feed(const std::uint8_t*p,std::size_t n){
 }
 Log::Log(std::filesystem::path p):path_(std::move(p)),out_(path_,std::ios::app|std::ios::binary){}
 bool Log::append(const Event&e){auto b=encode(e);std::lock_guard l(m_);if(!out_)return false;out_.write(reinterpret_cast<const char*>(b.data()),static_cast<std::streamsize>(b.size()));out_.flush();return out_.good();}
-std::uint64_t Log::recover(){std::lock_guard l(m_);std::ifstream in(path_,std::ios::binary);std::vector<std::uint8_t>b((std::istreambuf_iterator<char>(in)),{});std::size_t off=0,good=0;std::uint64_t next=1;while(off+20<=b.size()){if(get32(b,off)!=0x57523031u){++off;continue;}auto len=get32(b,off+12);if(len>1u<<20||b.size()-off<20+len)break;std::string payload(b.begin()+static_cast<std::ptrdiff_t>(off+16),b.begin()+static_cast<std::ptrdiff_t>(off+16+len));if(checksum(payload)==get32(b,off+16+len)){auto id=get64(b,off+4);if(id==std::numeric_limits<std::uint64_t>::max())throw std::overflow_error("event id exhausted");next=std::max(next,id+1);off+=20+len;good=off;}else ++off;}in.close();std::error_code ec;std::filesystem::resize_file(path_,good,ec);out_.close();out_.open(path_,std::ios::app|std::ios::binary);return next;}
-std::vector<Event> Log::replay()const{std::lock_guard l(m_);std::ifstream in(path_,std::ios::binary);std::vector<std::uint8_t>b((std::istreambuf_iterator<char>(in)),{});std::vector<Event>r;std::size_t off=0;while(off+20<=b.size()){if(get32(b,off)!=0x57523031u){++off;continue;}auto len=get32(b,off+12);if(len>1u<<20||b.size()-off<20+len)break;std::string payload(b.begin()+static_cast<std::ptrdiff_t>(off+16),b.begin()+static_cast<std::ptrdiff_t>(off+16+len));if(checksum(payload)==get32(b,off+16+len))r.push_back({get64(b,off+4),std::move(payload),{},{} });off+=20+len;}return r;}
+// Read the whole log into memory with one buffered read. Reading through
+// istreambuf_iterator would cost a virtual call per byte and is orders of
+// magnitude slower under instrumentation.
+static std::vector<std::uint8_t> read_all(const std::filesystem::path&p){
+  std::ifstream in(p,std::ios::binary|std::ios::ate);
+  if(!in)return {};
+  auto size=in.tellg();
+  if(size<0)return {};
+  std::vector<std::uint8_t>b(static_cast<std::size_t>(size));
+  in.seekg(0);
+  if(!in.read(reinterpret_cast<char*>(b.data()),size))return {};
+  return b;
+}
+std::uint64_t Log::recover(){std::lock_guard l(m_);auto b=read_all(path_);std::size_t off=0,good=0;std::uint64_t next=1;while(off+20<=b.size()){if(get32(b,off)!=0x57523031u){++off;continue;}auto len=get32(b,off+12);if(len>1u<<20||b.size()-off<20+len)break;std::string payload(b.begin()+static_cast<std::ptrdiff_t>(off+16),b.begin()+static_cast<std::ptrdiff_t>(off+16+len));if(checksum(payload)==get32(b,off+16+len)){auto id=get64(b,off+4);if(id==std::numeric_limits<std::uint64_t>::max())throw std::overflow_error("event id exhausted");next=std::max(next,id+1);off+=20+len;good=off;}else ++off;}std::error_code ec;std::filesystem::resize_file(path_,good,ec);out_.close();out_.open(path_,std::ios::app|std::ios::binary);return next;}
+std::vector<Event> Log::replay()const{std::lock_guard l(m_);auto b=read_all(path_);std::vector<Event>r;std::size_t off=0;while(off+20<=b.size()){if(get32(b,off)!=0x57523031u){++off;continue;}auto len=get32(b,off+12);if(len>1u<<20||b.size()-off<20+len)break;std::string payload(b.begin()+static_cast<std::ptrdiff_t>(off+16),b.begin()+static_cast<std::ptrdiff_t>(off+16+len));if(checksum(payload)==get32(b,off+16+len))r.push_back({get64(b,off+4),std::move(payload),{},{} });off+=20+len;}return r;}
 void Metrics::inc(std::string n){std::lock_guard l(m_);++v_[std::move(n)];}
 std::string Metrics::prometheus()const{std::lock_guard l(m_);std::ostringstream o;for(auto&[k,v]:v_)o<<"weir_"<<k<<" "<<v<<"\n";return o.str();}
 void log(std::string_view l,std::string_view m){auto now=std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());std::cout<<"{\"ts\":"<<now<<",\"level\":\""<<l<<"\",\"msg\":\""<<m<<"\"}\n"<<std::flush;}
