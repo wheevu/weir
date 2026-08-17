@@ -48,7 +48,7 @@ Requirements: CMake 3.20+ and a C++20 compiler.
 Use `cmake --preset asan` for AddressSanitizer and UBSan.
 
 Linux runtime integration tests are disabled by default because the server uses Linux epoll APIs.
-Enable them on Linux with `-DWEIR_LINUX_INTEGRATION_TESTS=ON` when configuring CMake.
+Enable them on Linux with `-DWEIR_LINUX_INTEGRATION_TESTS=ON` when configuring CMake, then run `ctest --preset default` to include real-socket transport scenarios (fragmentation, half-close, fd reuse, slow readers, malformed-client isolation).
 
 Linux provides the nonblocking TCP/epoll server on port 9000. macOS builds the core and CLI tools, but the server reports that networking is unavailable.
 

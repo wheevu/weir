@@ -93,7 +93,7 @@ class Server:
 
     def inspect_log(self):
         out = subprocess.check_output([self.inspect_bin, self.log_path],
-                                      text=True)
+                                      text=True, timeout=30)
         return out.strip()
 
     def fetch_metrics(self):
@@ -303,8 +303,13 @@ def scenario_client_churn(server_bin, inspect_bin):
             c = connect(srv.port)
             c.sendall(make_frame(7000 + i, b"churn"))
             c.close()
-        time.sleep(0.3)
+        # The server processes closes asynchronously; wait for the fd count
+        # to stabilize (bounded) instead of asserting on a fixed sleep.
+        deadline = time.monotonic() + 5
         after = fd_count()
+        while after > before + 5 and time.monotonic() < deadline:
+            time.sleep(0.05)
+            after = fd_count()
         assert after <= before + 5, (before, after)
         c = connect(srv.port)
         c.sendall(make_frame(9999, b"still-alive"))
@@ -312,6 +317,81 @@ def scenario_client_churn(server_bin, inspect_bin):
         c.close()
         assert ids == [201], ids
         assert "records=201" in srv.inspect_log(), srv.inspect_log()
+    finally:
+        srv.stop()
+
+
+def scenario_mid_frame_disconnect(server_bin, inspect_bin):
+    """A client that disconnects mid-frame must not hurt the server."""
+    srv = Server(server_bin, inspect_bin)
+    try:
+        c = connect(srv.port)
+        c.sendall(b"WR01\x00\x00")  # partial header, then vanish
+        c.close()
+        time.sleep(0.1)
+        d = connect(srv.port)
+        d.sendall(make_frame(8000, b"after-disconnect"))
+        ids = recv_ack_ids(d, 1)
+        d.close()
+        assert ids == [1], ids
+        assert "records=1" in srv.inspect_log(), srv.inspect_log()
+    finally:
+        srv.stop()
+
+
+def scenario_malformed_isolation(server_bin, inspect_bin):
+    """Malformed traffic from client A must not affect client B."""
+    srv = Server(server_bin, inspect_bin)
+    try:
+        a = connect(srv.port)
+        a.sendall(bytes(range(256)) * 8)  # garbage, no magic
+        a.sendall(make_frame(9000, b"bad-checksum")[:-1])  # truncated frame
+        oversized = (b"WR01" + struct.pack(">QI", 9001, 1024 * 1024 + 1)
+                     + b"\0" * 4)
+        a.sendall(oversized)  # poisons A's parser, not the server
+
+        b = connect(srv.port)
+        for i in range(3):
+            b.sendall(make_frame(9002 + i, b"valid-%d" % i))
+        ids = recv_ack_ids(b, 3)
+        b.close()
+        a.close()
+        assert ids == [1, 2, 3], ids
+        assert "records=3" in srv.inspect_log(), srv.inspect_log()
+        c = connect(srv.port)  # server still healthy
+        c.sendall(make_frame(9005, b"still-alive"))
+        ids = recv_ack_ids(c, 1)
+        c.close()
+        assert ids == [4], ids
+    finally:
+        srv.stop()
+
+
+def scenario_slow_reader(server_bin, inspect_bin):
+    """A client that does not read ACKs for a while must get every ACK,
+    in order, without truncation or duplication.
+
+    The event count is sized so the scenario also terminates quickly under
+    ASan, where flush-per-event persistence is several times slower. The
+    client shrinks its receive window so the server's ACK path must
+    experience real send-buffer pressure.
+    """
+    srv = Server(server_bin, inspect_bin)
+    count = 4000
+    try:
+        c = connect(srv.port, timeout=60)
+        c.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+        for chunk_start in range(0, count, 500):
+            buf = b"".join(make_frame(10000 + i, b"x" * 1024)
+                           for i in range(chunk_start, chunk_start + 500))
+            c.sendall(buf)
+            time.sleep(0.01)  # pace so the server can buffer completions
+        time.sleep(0.8)  # deliberately not reading while ACKs accumulate
+        ids = recv_ack_ids(c, count, timeout=60)
+        c.close()
+        assert len(ids) == count and len(set(ids)) == count, len(ids)
+        assert ids == sorted(ids), "ACK order must be preserved"
+        assert "records=%d" % count in srv.inspect_log(), srv.inspect_log()
     finally:
         srv.stop()
 
@@ -325,6 +405,9 @@ SCENARIOS = {
     "ack_after_half_close": scenario_ack_after_half_close,
     "fd_reuse_guard": scenario_fd_reuse_guard,
     "client_churn": scenario_client_churn,
+    "mid_frame_disconnect": scenario_mid_frame_disconnect,
+    "malformed_isolation": scenario_malformed_isolation,
+    "slow_reader": scenario_slow_reader,
 }
 
 
@@ -343,10 +426,11 @@ def main():
         started = time.monotonic()
         try:
             SCENARIOS[name](args.server, args.inspect)
-            print("PASS %-22s %.1fs" % (name, time.monotonic() - started))
+            print("PASS %-22s %.1fs" % (name, time.monotonic() - started),
+                  flush=True)
         except Exception as exc:  # noqa: BLE001 - report and continue
             FAILURES.append((name, exc))
-            print("FAIL %-22s %r" % (name, exc))
+            print("FAIL %-22s %r" % (name, exc), flush=True)
     if FAILURES:
         print("%d scenario(s) failed" % len(FAILURES))
         return 1
