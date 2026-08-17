@@ -32,9 +32,11 @@ int main(){
  {weir::Log l(path);check(l.append(e),"append");}
  {std::ofstream out(path,std::ios::app|std::ios::binary);out.write("WR01",4);}
  {weir::Log l(path);check(l.recover()==43,"recover id");auto records=l.replay();check(records.size()==1&&records[0].id==42,"replay first");}
- weir::BoundedQueue<int> q(1);check(q.push(7),"queue push");bool waiter_result=true;std::thread waiter([&]{waiter_result=q.push(8);});q.close();waiter.join();check(!waiter_result,"closed queue push");check(q.pop().value()==7,"queue pop");check(!q.pop().has_value(),"closed queue empty");
+  weir::BoundedQueue<int> q(1);check(q.push(7),"queue push");check(!q.try_push(8),"full queue try push");bool waiter_result=true;std::thread waiter([&]{waiter_result=q.push(8);});q.close();waiter.join();check(!waiter_result,"closed queue push");check(!q.try_push(9),"closed queue try push");check(q.pop().value()==7,"queue pop");check(!q.pop().has_value(),"closed queue empty");
   {weir::Log l(path);weir::Metrics m;{weir::Pipeline pipeline(l,m,1);auto ack=std::make_shared<std::promise<bool>>();auto done=ack->get_future();check(pipeline.submit({9,"queued",ack,{}}),"pipeline submit");check(done.get(),"pipeline ack");}}
- try { weir::Log l(path); weir::Metrics m; weir::Pipeline invalid(l,m,0); check(false,"zero workers"); } catch(const std::invalid_argument&) {}
+  try { weir::Log l(path); weir::Metrics m; weir::Pipeline invalid(l,m,0); check(false,"zero workers"); } catch(const std::invalid_argument&) {}
+  try { weir::Log l(path); weir::Metrics m; weir::Pipeline invalid(l,m,1,0,1); check(false,"zero durable capacity"); } catch(const std::invalid_argument&) {}
+  try { weir::Log l(path); weir::Metrics m; weir::Pipeline invalid(l,m,1,1,0); check(false,"zero process capacity"); } catch(const std::invalid_argument&) {}
   {weir::Log l(path);check(l.recover()==43,"recover after pipeline");auto records=l.replay();check(records.size()==2&&records.back().id==9,"replay pipeline event");}
   weir::Metrics m;m.inc("events");check(m.prometheus().find("weir_events 1")!=std::string::npos,"metrics");std::filesystem::remove(path);std::cout<<"all tests passed\n";
 }

@@ -59,8 +59,9 @@ std::vector<Event> Log::replay()const{std::lock_guard l(m_);auto b=read_all(path
 void Metrics::inc(std::string n){std::lock_guard l(m_);++v_[std::move(n)];}
 std::string Metrics::prometheus()const{std::lock_guard l(m_);std::ostringstream o;for(auto&[k,v]:v_)o<<"weir_"<<k<<" "<<v<<"\n";return o.str();}
 void log(std::string_view l,std::string_view m){auto now=std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());std::cout<<"{\"ts\":"<<now<<",\"level\":\""<<l<<"\",\"msg\":\""<<m<<"\"}\n"<<std::flush;}
-Pipeline::Pipeline(Log&l,Metrics&m,unsigned n):log_(l),metrics_(m){
-  if(n==0)throw std::invalid_argument("workers must be greater than zero");
+ Pipeline::Pipeline(Log&l,Metrics&m,unsigned n,std::size_t durable_capacity,std::size_t process_capacity):log_(l),metrics_(m),durable_(durable_capacity),process_(process_capacity){
+   if(n==0)throw std::invalid_argument("workers must be greater than zero");
+   if(durable_capacity==0||process_capacity==0)throw std::invalid_argument("queue capacities must be greater than zero");
   // Test-only hook: delays ACK delivery so async-lifetime races become
   // deterministic in integration tests. Inert unless the env var is set.
   std::uint64_t ack_delay_ms=0;
@@ -75,7 +76,8 @@ Pipeline::Pipeline(Log&l,Metrics&m,unsigned n):log_(l),metrics_(m){
   for(unsigned i=0;i<n;++i)workers_.emplace_back([this]{while(auto e=process_.pop()){metrics_.inc("processed_total");(void)e;}});
 }
 Pipeline::~Pipeline(){durable_.close();if(persister_.joinable())persister_.join();process_.close();for(auto&t:workers_)if(t.joinable())t.join();}
-bool Pipeline::submit(Event e){metrics_.inc("validated_total");return durable_.push(std::move(e));}
+ bool Pipeline::submit(Event e){metrics_.inc("validated_total");return durable_.push(std::move(e));}
+ bool Pipeline::try_submit(Event e){metrics_.inc("validated_total");if(!durable_.try_push(std::move(e))){metrics_.inc("rejected_total");return false;}return true;}
 #ifdef __linux__
 int run_server(unsigned port,Log&lf,Metrics&m,std::atomic<bool>&stop,unsigned workers){
   if(port==0||port>65535){return 2;}
@@ -116,12 +118,15 @@ int run_server(unsigned port,Log&lf,Metrics&m,std::atomic<bool>&stop,unsigned wo
     std::string out;          // pending outbound ACK/ERR bytes
     std::uint64_t gen=0;
     bool read_open=true;      // peer may still send; false after EOF
-    std::uint64_t pending=0;  // persistence completions outstanding
+     std::uint64_t pending=0;  // persistence completions outstanding
+     std::uint64_t next_reply=0;
+     std::uint64_t next_emit=0;
+     std::map<std::uint64_t,std::optional<std::string>> replies;
   };
   std::map<int,Conn> conns;
   std::uint64_t next_gen=0;
   std::mutex cm;
-  std::deque<std::tuple<int,std::uint64_t,std::uint64_t,bool>> done;
+  std::deque<std::tuple<int,std::uint64_t,std::uint64_t,std::uint64_t,bool>> done;
   std::vector<epoll_event> es(32);
   std::uint64_t next=lf.recover();
 
@@ -177,16 +182,23 @@ int run_server(unsigned port,Log&lf,Metrics&m,std::atomic<bool>&stop,unsigned wo
         read(wake,&x,sizeof x);
         std::lock_guard l(cm);
         while(!done.empty()){
-          auto[c,g,id,ok]=done.front();
-          done.pop_front();
-          auto it=conns.find(c);
-          if(it==conns.end())continue;    // connection already gone
-          if(it->second.gen!=g)continue;  // fd reused by another connection
-          if(it->second.pending>0)--it->second.pending;
-          std::string msg=ok?"OK "+std::to_string(id)+"\n":"ERR persistence\n";
-          if(it->second.out.size()+msg.size()>1024*1024){drop(c);continue;}
-          it->second.out+=msg;
-          update_interest(c);
+           auto[cfd,g,seq,id,ok]=done.front();
+           done.pop_front();
+           auto it=conns.find(cfd);
+           if(it==conns.end())continue;    // connection already gone
+           if(it->second.gen!=g)continue;  // fd reused by another connection
+           if(it->second.pending>0)--it->second.pending;
+           it->second.replies[seq]=ok?"OK "+std::to_string(id)+"\n":"ERR persistence\n";
+           while(true){
+             auto reply=it->second.replies.find(it->second.next_emit);
+             if(reply==it->second.replies.end()||!reply->second)break;
+             const auto& msg=*reply->second;
+             if(it->second.out.size()+msg.size()>1024*1024){drop(cfd);break;}
+             it->second.out+=msg;
+             it->second.replies.erase(reply);
+             ++it->second.next_emit;
+           }
+           if(conns.count(cfd))update_interest(cfd);
         }
         continue;
       }
@@ -236,18 +248,34 @@ int run_server(unsigned port,Log&lf,Metrics&m,std::atomic<bool>&stop,unsigned wo
             break;
           }
           auto parsed=c.parser.feed(buf,static_cast<std::size_t>(r));
-          for(auto& e:parsed){
-            e.id=next++;
-            auto g=c.gen;
-            ++c.pending;
-            e.durable_completion=[&,fd,g,id=e.id](bool ok){
-              std::lock_guard l(cm);
-              done.emplace_back(fd,g,id,ok);
+           for(auto& e:parsed){
+             if(c.replies.size()>=65536){drop(fd);conn_gone=true;break;}
+             e.id=next++;
+             auto g=c.gen;
+             ++c.pending;
+             auto seq=c.next_reply++;
+             c.replies.emplace(seq,std::nullopt);
+             e.durable_completion=[&,fd,g,seq,id=e.id](bool ok){
+               std::lock_guard l(cm);
+               done.emplace_back(fd,g,seq,id,ok);
               std::uint64_t x=1;
               write(wake,&x,sizeof x);
             };
-            if(!pipe->submit(std::move(e))){drop(fd);conn_gone=true;break;}
-          }
+             if(!pipe->try_submit(std::move(e))){
+               --c.pending;
+               m.inc("overload_total");
+               c.replies[seq]="ERR queue\n";
+               while(true){
+                 auto reply=c.replies.find(c.next_emit);
+                 if(reply==c.replies.end()||!reply->second)break;
+                 const auto& msg=*reply->second;
+                 if(c.out.size()+msg.size()>1024*1024){drop(fd);conn_gone=true;break;}
+                 c.out+=msg;c.replies.erase(reply);++c.next_emit;
+               }
+               if(!conn_gone)update_interest(fd);
+             }
+             if(conn_gone)break;
+           }
           if(conn_gone)break;
           // A malformed frame poisons this connection only: valid events
           // decoded before it were already submitted above.

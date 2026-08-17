@@ -405,6 +405,45 @@ def scenario_slow_reader(server_bin, inspect_bin):
         srv.stop()
 
 
+def scenario_overload_admission(server_bin, inspect_bin):
+    """A full admission queue rejects without blocking the epoll thread."""
+    srv = Server(server_bin, inspect_bin,
+                 extra_env={"WEIR_TEST_ACK_DELAY_MS": "20"})
+    count = 320
+    try:
+        c = connect(srv.port, timeout=30)
+        c.sendall(b"".join(make_frame(30000 + i, b"overload")
+                           for i in range(count)))
+        c.settimeout(30)
+        data = b""
+        while data.count(b"\n") < count:
+            chunk = c.recv(1 << 16)
+            if not chunk:
+                raise RuntimeError("server closed during overload")
+            data += chunk
+        lines = data.splitlines()
+        assert any(line == b"ERR queue" for line in lines), lines[:5]
+        accepted = sum(line.startswith(b"OK ") for line in lines)
+        assert accepted > 0, lines[:5]
+        expected_id = 1
+        for line in lines:
+            if line.startswith(b"OK "):
+                assert line == (b"OK " + str(expected_id).encode()), line
+            expected_id += 1
+        metrics = srv.fetch_metrics().split(b"\r\n\r\n", 1)[1].decode()
+        overload = int(next(line.split()[1] for line in metrics.splitlines()
+                            if line.startswith("weir_overload_total ")))
+        rejected = int(next(line.split()[1] for line in metrics.splitlines()
+                            if line.startswith("weir_rejected_total ")))
+        assert overload == rejected == lines.count(b"ERR queue"), metrics
+        assert "records=%d" % accepted in srv.inspect_log(), srv.inspect_log()
+        c.sendall(make_frame(40000, b"recovered"))
+        assert recv_ack_ids(c, 1, timeout=10) == [count + 1]
+        c.close()
+    finally:
+        srv.stop()
+
+
 SCENARIOS = {
     "metrics_endpoint": scenario_metrics,
     "valid_frame": scenario_valid_frame,
@@ -417,6 +456,7 @@ SCENARIOS = {
     "mid_frame_disconnect": scenario_mid_frame_disconnect,
     "malformed_isolation": scenario_malformed_isolation,
     "slow_reader": scenario_slow_reader,
+    "overload_admission": scenario_overload_admission,
 }
 
 

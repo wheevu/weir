@@ -8,7 +8,7 @@ Weir is a small Linux-first C++20 event-ingestion service.
 
 **Verified on Linux/ARM64:** real TCP/epoll transport, fragmented streams, half-closes, asynchronous acknowledgements, concurrent clients, partial nonblocking writes, and metrics HTTP behavior are covered by process/socket integration tests.
 
-Stable-storage durability, explicit overload admission, and crash-recovery guarantees are still under development.
+Stable-storage durability and crash-recovery guarantees are still under development.
 
 ## What it demonstrates
 
@@ -32,7 +32,7 @@ Stable-storage durability, explicit overload admission, and crash-recovery guara
 - Linux process/socket integration tests
 - ASan/UBSan and Valgrind-clean tested paths
 
-Still in progress: overload admission and backpressure, `fdatasync` durability, process-level crash recovery, Prometheus/Grafana deployment, full observability, and performance characterization.
+Still in progress: `fdatasync` durability, process-level crash recovery, Prometheus/Grafana deployment, full observability, and performance characterization.
 
 ## 30-second overview
 
