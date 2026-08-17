@@ -34,6 +34,14 @@ if(WEIR_LINUX_INTEGRATION_TESTS)
   if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
     message(FATAL_ERROR "WEIR_LINUX_INTEGRATION_TESTS requires Linux runtime support")
   endif()
+  find_program(PYTHON3 python3)
+  if(PYTHON3)
+    add_test(NAME weir-transport-integration
+      COMMAND ${PYTHON3} ${CMAKE_SOURCE_DIR}/tests/integration/transport_test.py
+              --server $<TARGET_FILE:weir-server>
+              --inspect $<TARGET_FILE:weir-inspect-log>)
+    set_tests_properties(weir-transport-integration PROPERTIES TIMEOUT 120)
+  endif()
   add_test(NAME weir-crash-recovery COMMAND ${CMAKE_SOURCE_DIR}/scripts/crash-recovery.sh)
   set_tests_properties(weir-crash-recovery PROPERTIES TIMEOUT 20)
 endif()

@@ -1,6 +1,7 @@
 #include "weir/weir.hpp"
 #include <chrono>
 #include <cerrno>
+#include <cstring>
 #include <iostream>
 #include <limits>
 #include <sstream>
@@ -46,7 +47,42 @@ int run_server(unsigned port,Log&lf,Metrics&m,std::atomic<bool>&stop,unsigned wo
   close(wake);close(ep);close(s);
   return 0;
 }
-int run_metrics_http(unsigned port,Metrics&m,std::atomic<bool>&stop){if(port==0||port>65535)return 2;int s=socket(AF_INET,SOCK_STREAM,0);if(s<0)return 1;int yes=1;setsockopt(s,SOL_SOCKET,SO_REUSEADDR,&yes,sizeof yes);sockaddr_in a{};a.sin_family=AF_INET;a.sin_port=htons(static_cast<std::uint16_t>(port));a.sin_addr.s_addr=INADDR_LOOPBACK;if(bind(s,reinterpret_cast<sockaddr*>(&a),sizeof a)||listen(s,8)){close(s);return 1;}pollfd p{s,POLLIN,0};while(!stop){if(poll(&p,1,100)<1)continue;int c=accept(s,nullptr,nullptr);if(c<0)continue;auto body=m.prometheus();std::string r="HTTP/1.1 200 OK\r\nContent-Length: "+std::to_string(body.size())+"\r\nConnection: close\r\n\r\n"+body;send(c,r.data(),r.size(),MSG_NOSIGNAL);close(c);}close(s);return 0;}
+int run_metrics_http(unsigned port,Metrics&m,std::atomic<bool>&stop){
+  if(port==0||port>65535){return 2;}
+  int s=socket(AF_INET,SOCK_STREAM,0);
+  if(s<0){log("error","metrics socket failed: "+std::string(std::strerror(errno)));return 1;}
+  int yes=1;
+  setsockopt(s,SOL_SOCKET,SO_REUSEADDR,&yes,sizeof yes);
+  sockaddr_in a{};
+  a.sin_family=AF_INET;
+  a.sin_port=htons(static_cast<std::uint16_t>(port));
+  a.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+  if(bind(s,reinterpret_cast<sockaddr*>(&a),sizeof a)!=0){
+    log("error","metrics bind failed: "+std::string(std::strerror(errno)));
+    close(s);
+    return 1;
+  }
+  if(listen(s,8)!=0){
+    log("error","metrics listen failed: "+std::string(std::strerror(errno)));
+    close(s);
+    return 1;
+  }
+  pollfd p{s,POLLIN,0};
+  while(!stop){
+    if(poll(&p,1,100)<1)continue;
+    int c=accept(s,nullptr,nullptr);
+    if(c<0)continue;
+    std::uint8_t tmp[4096];
+    (void)recv(c,tmp,sizeof tmp,0);
+    auto body=m.prometheus();
+    std::string r="HTTP/1.1 200 OK\r\nContent-Length: "+std::to_string(body.size())+"\r\nConnection: close\r\n\r\n"+body;
+    send(c,r.data(),r.size(),MSG_NOSIGNAL);
+    shutdown(c,SHUT_WR);
+    close(c);
+  }
+  close(s);
+  return 0;
+}
 #else
 int run_server(unsigned,Log&,Metrics&,std::atomic<bool>&,unsigned){log("warn","network server unavailable on this platform");return 2;}int run_metrics_http(unsigned,Metrics&,std::atomic<bool>&){return 2;}
 #endif
