@@ -60,6 +60,9 @@ class Server:
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             env=env, text=True)
         if not self.wait_ready(5.0):
+            if self.proc.poll() is None:
+                self.proc.kill()
+                self.proc.wait()
             out = ""
             if self.proc.stdout:
                 out = self.proc.stdout.read()
@@ -289,6 +292,11 @@ def scenario_fd_reuse_guard(server_bin, inspect_bin):
         assert b"OK 1" not in extra, extra
         # A's event was persisted before its connection died.
         assert "records=2" in srv.inspect_log(), srv.inspect_log()
+        # Limitation: the test cannot observe the server-side fd number, so
+        # it proves "a stale completion never reaches a new client" but not
+        # that B specifically reused A's fd. The generation check itself is
+        # exercised whenever B lands on A's fd (the kernel hands out the
+        # lowest free fd, which the churn makes overwhelmingly likely).
     finally:
         srv.stop()
 

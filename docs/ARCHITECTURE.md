@@ -39,10 +39,10 @@ Three facts are tracked separately:
 The mask is derived from state on every change, through one helper:
 
 ```text
-EPOLLRDHUP | (read_open ? EPOLLIN : 0) | (!out.empty() ? EPOLLOUT : 0)
+(read_open ? EPOLLIN|EPOLLRDHUP : 0) | (!out.empty() ? EPOLLOUT : 0)
 ```
 
-`EPOLLOUT` is armed only while outbound bytes exist, so idle connections never busy-loop the loop. Nonblocking `send()` may write fewer bytes than requested; the remainder stays in `out` and the mask keeps `EPOLLOUT` until the drain completes.
+`EPOLLOUT` is armed only while outbound bytes exist, so idle connections never busy-loop the loop. `EPOLLRDHUP` is level-triggered and stays asserted after a peer half-close, so it is removed once EOF is observed; otherwise every pending completion or blocked write would wake `epoll_wait` immediately in a busy loop. Nonblocking `send()` may write fewer bytes than requested; the remainder stays in `out` and the mask keeps `EPOLLOUT` until the drain completes.
 
 ### Asynchronous completions
 
