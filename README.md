@@ -6,29 +6,45 @@ Weir is a small Linux-first C++20 event-ingestion service.
 
 ![Weir architecture](docs/ARCHITECTURE.svg)
 
-*Design map only. Linux runtime verification is tracked separately from this baseline.*
+**Verified on Linux/ARM64:** real TCP/epoll transport, fragmented streams, half-closes, asynchronous acknowledgements, concurrent clients, partial nonblocking writes, and metrics HTTP behavior are covered by process/socket integration tests.
+
+Stable-storage durability, explicit overload admission, and crash-recovery guarantees are still under development.
 
 ## What it demonstrates
 
 - Linux networking with nonblocking TCP and `epoll`
 - Incremental framing over a byte stream
-- Bounded queues and explicit backpressure
+- Bounded concurrent queues with explicit capacity limits
 - Persistence before processing acknowledgement
 - Worker ownership and coordinated shutdown
 - Append-only recovery and replay
 - Prometheus-compatible metrics and structured logs
+
+## Verified on Linux
+
+- GCC 13.3 and Clang 18.1 with strict warnings
+- Real nonblocking TCP/epoll transport (syscalls confirmed with `strace`)
+- Fragmented and coalesced TCP frames
+- TCP half-close with pending asynchronous ACKs
+- Partial nonblocking response writes
+- Concurrent clients and malformed-client isolation
+- Metrics HTTP endpoint on 127.0.0.1
+- Linux process/socket integration tests
+- ASan/UBSan and Valgrind-clean tested paths
+
+Still in progress: overload admission and backpressure, `fdatasync` durability, process-level crash recovery, Prometheus/Grafana deployment, full observability, and performance characterization.
 
 ## 30-second overview
 
 1. A TCP client sends length-delimited `WR01` frames.
 2. The parser tolerates arbitrary read fragmentation and rejects bad checksums.
 3. Valid events enter a bounded durability queue, are appended and flushed to an append-only log, then enter the processing queue.
-4. Worker threads process only events that were durably appended.
-5. Prometheus scrapes the local metrics endpoint on port 9100 by default.
+4. Worker threads process only events that were successfully appended and flushed.
+5. Weir exposes Prometheus-compatible metrics over a local HTTP endpoint on port 9100 by default.
 
 The service is intentionally single-process and has no runtime dependency beyond libc and pthreads.
 
-The lifecycle is validated, queued, durably appended, acknowledged, queued for processing, and handled by workers.
+The lifecycle is validated, queued, appended and flushed, acknowledged, queued for processing, and handled by workers.
 
 ## Event lifecycle
 
