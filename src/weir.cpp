@@ -93,11 +93,19 @@ int run_server(unsigned port,Log&lf,Metrics&m,std::atomic<bool>&stop,unsigned wo
   epoll_event ev{};
   ev.events=EPOLLIN;
   ev.data.fd=s;
-  epoll_ctl(ep,EPOLL_CTL_ADD,s,&ev);
+  if(epoll_ctl(ep,EPOLL_CTL_ADD,s,&ev)!=0){
+    log("error","epoll ADD listen failed: "+std::string(std::strerror(errno)));
+    close(wake);close(ep);close(s);
+    return 1;
+  }
   epoll_event we{};
   we.events=EPOLLIN;
   we.data.fd=wake;
-  epoll_ctl(ep,EPOLL_CTL_ADD,wake,&we);
+  if(epoll_ctl(ep,EPOLL_CTL_ADD,wake,&we)!=0){
+    log("error","epoll ADD wake failed: "+std::string(std::strerror(errno)));
+    close(wake);close(ep);close(s);
+    return 1;
+  }
 
   // Per-connection state, owned exclusively by the epoll thread.
   // gen is a monotonic identity that is never reused, so an async
@@ -122,19 +130,24 @@ int run_server(unsigned port,Log&lf,Metrics&m,std::atomic<bool>&stop,unsigned wo
   auto drop=[&](int fd){
     auto it=conns.find(fd);
     if(it==conns.end())return;  // exactly-once teardown
-    epoll_ctl(ep,EPOLL_CTL_DEL,fd,nullptr);
+    if(epoll_ctl(ep,EPOLL_CTL_DEL,fd,nullptr)!=0){
+      log("error","epoll DEL failed: "+std::string(std::strerror(errno)));
+    }
     close(fd);
     conns.erase(it);
   };
 
   // Derive the epoll interest mask from connection state. EPOLLOUT is armed
   // only while outbound bytes are pending, so an idle or readable socket
-  // cannot busy-loop the loop.
+  // cannot busy-loop the loop. EPOLLRDHUP is level-triggered and stays
+  // asserted after the peer half-closes; keeping it armed would make
+  // epoll_wait return instantly for every pending completion or blocked
+  // write. It is therefore registered only while the read side is open.
   auto update_interest=[&](int fd){
     auto it=conns.find(fd);
     if(it==conns.end())return;
-    std::uint32_t want=EPOLLRDHUP;
-    if(it->second.read_open)want|=EPOLLIN;
+    std::uint32_t want=0;
+    if(it->second.read_open)want|=EPOLLIN|EPOLLRDHUP;
     if(!it->second.out.empty())want|=EPOLLOUT;
     epoll_event ce{};
     ce.events=want;
@@ -187,7 +200,11 @@ int run_server(unsigned port,Log&lf,Metrics&m,std::atomic<bool>&stop,unsigned wo
           epoll_event ce{};
           ce.events=EPOLLIN|EPOLLRDHUP;
           ce.data.fd=c;
-          if(epoll_ctl(ep,EPOLL_CTL_ADD,c,&ce)!=0){close(c);conns.erase(c);}
+          if(epoll_ctl(ep,EPOLL_CTL_ADD,c,&ce)!=0){
+            log("error","epoll ADD conn failed: "+std::string(std::strerror(errno)));
+            close(c);
+            conns.erase(c);
+          }
         }
         continue;
       }
@@ -249,6 +266,10 @@ int run_server(unsigned port,Log&lf,Metrics&m,std::atomic<bool>&stop,unsigned wo
   }
   // Stop Pipeline callbacks before closing the wake fd they signal.
   pipe.reset();
+  // Close every client socket explicitly; the epoll registrations die with
+  // the epoll instance.
+  for(auto& kv:conns)close(kv.first);
+  conns.clear();
   close(wake);close(ep);close(s);
   return 0;
 }
@@ -277,6 +298,10 @@ int run_metrics_http(unsigned port,Metrics&m,std::atomic<bool>&stop){
     if(poll(&p,1,100)<1)continue;
     int c=accept(s,nullptr,nullptr);
     if(c<0)continue;
+    // A silent metrics client must not block shutdown: bound the request
+    // read so the loop can always proceed to respond and close.
+    timeval tv{1,0};
+    setsockopt(c,SOL_SOCKET,SO_RCVTIMEO,&tv,sizeof tv);
     std::uint8_t tmp[4096];
     (void)recv(c,tmp,sizeof tmp,0);
     auto body=m.prometheus();
