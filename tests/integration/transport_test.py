@@ -245,6 +245,77 @@ def scenario_ack_after_half_close(server_bin, inspect_bin):
         srv.stop()
 
 
+def scenario_fd_reuse_guard(server_bin, inspect_bin):
+    """A stale persistence completion must never reach a new connection that
+    reuses the old connection's fd number.
+
+    Deterministic setup: client A submits an event whose ACK is delayed
+    (WEIR_TEST_ACK_DELAY_MS), then triggers a server-side drop via an
+    oversized length field. A's connection is destroyed while its completion
+    is still in flight. After a churn of connections, B owns the same fd
+    number when A's stale completion fires. B must never see A's ACK.
+    """
+    srv = Server(server_bin, inspect_bin,
+                 extra_env={"WEIR_TEST_ACK_DELAY_MS": "400"})
+    try:
+        # A: one valid event, then an oversized length field that makes the
+        # parser throw, forcing the server to drop the connection while the
+        # valid event's completion is still delayed.
+        a = connect(srv.port)
+        a.sendall(make_frame(5000, b"from-a"))
+        bad = (b"WR01" + struct.pack(">QI", 5001, 1024 * 1024 + 1)
+               + b"\0" * 4)
+        a.sendall(bad)
+        a.close()
+        time.sleep(0.3)  # let the server process the drop
+
+        for _ in range(8):  # churn so B takes the lowest free fd
+            c = connect(srv.port)
+            c.close()
+            time.sleep(0.01)
+
+        b = connect(srv.port)
+        b.sendall(make_frame(6000, b"from-b"))
+        ids = recv_ack_ids(b, 1)
+        # Wait past the stale completion's delivery window and make sure
+        # nothing else arrives on B's connection.
+        b.settimeout(0.8)
+        try:
+            extra = b.recv(1 << 16)
+        except socket.timeout:
+            extra = b""
+        b.close()
+        assert ids == [2], (ids, extra)
+        assert b"OK 1" not in extra, extra
+        # A's event was persisted before its connection died.
+        assert "records=2" in srv.inspect_log(), srv.inspect_log()
+    finally:
+        srv.stop()
+
+
+def scenario_client_churn(server_bin, inspect_bin):
+    """Rapid connect/send/close cycles must not leak fds or break the server."""
+    srv = Server(server_bin, inspect_bin)
+    try:
+        fd_count = lambda: len(os.listdir("/proc/%d/fd" % srv.proc.pid))
+        before = fd_count()
+        for i in range(200):
+            c = connect(srv.port)
+            c.sendall(make_frame(7000 + i, b"churn"))
+            c.close()
+        time.sleep(0.3)
+        after = fd_count()
+        assert after <= before + 5, (before, after)
+        c = connect(srv.port)
+        c.sendall(make_frame(9999, b"still-alive"))
+        ids = recv_ack_ids(c, 1)
+        c.close()
+        assert ids == [201], ids
+        assert "records=201" in srv.inspect_log(), srv.inspect_log()
+    finally:
+        srv.stop()
+
+
 SCENARIOS = {
     "metrics_endpoint": scenario_metrics,
     "valid_frame": scenario_valid_frame,
@@ -252,6 +323,8 @@ SCENARIOS = {
     "coalesced_frames": scenario_coalesced_frames,
     "half_close_final_frame": scenario_half_close_final_frame,
     "ack_after_half_close": scenario_ack_after_half_close,
+    "fd_reuse_guard": scenario_fd_reuse_guard,
+    "client_churn": scenario_client_churn,
 }
 
 

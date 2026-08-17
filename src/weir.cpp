@@ -1,6 +1,7 @@
 #include "weir/weir.hpp"
 #include <chrono>
 #include <cerrno>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <limits>
@@ -23,7 +24,21 @@ static void put64(std::vector<std::uint8_t>&b,std::uint64_t x){for(int i=7;i>=0;
 static std::uint32_t get32(const std::vector<std::uint8_t>&b,std::size_t p){return (static_cast<std::uint32_t>(b[p])<<24u)|(static_cast<std::uint32_t>(b[p+1])<<16u)|(static_cast<std::uint32_t>(b[p+2])<<8u)|b[p+3];}
 static std::uint64_t get64(const std::vector<std::uint8_t>&b,std::size_t p){std::uint64_t x=0;for(std::size_t i=0;i<8;++i)x=(x<<8u)|b[p+i];return x;}
 std::vector<std::uint8_t> encode(const Event&e){std::vector<std::uint8_t>b;put32(b,0x57523031u);put64(b,e.id);put32(b,static_cast<std::uint32_t>(e.payload.size()));b.insert(b.end(),e.payload.begin(),e.payload.end());put32(b,checksum(e.payload));return b;}
-std::vector<Event> Parser::feed(const std::uint8_t*p,std::size_t n){b_.insert(b_.end(),p,p+n);std::vector<Event>r;while(b_.size()>=20){if(get32(b_,0)!=0x57523031u){b_.erase(b_.begin());continue;}auto len=get32(b_,12);if(len>1u<<20)throw std::runtime_error("frame too large");if(b_.size()<20+len)break;std::string s(b_.begin()+16,b_.begin()+16+len);if(checksum(s)==get32(b_,16+len))r.push_back({get64(b_,4),std::move(s),{},{} });b_.erase(b_.begin(),b_.begin()+20+len);}return r;}
+std::vector<Event> Parser::feed(const std::uint8_t*p,std::size_t n){
+  if(bad_)return {};
+  b_.insert(b_.end(),p,p+n);
+  std::vector<Event>r;
+  while(b_.size()>=20){
+    if(get32(b_,0)!=0x57523031u){b_.erase(b_.begin());continue;}
+    auto len=get32(b_,12);
+    if(len>1u<<20){bad_=true;break;}
+    if(b_.size()<20+len)break;
+    std::string s(b_.begin()+16,b_.begin()+16+len);
+    if(checksum(s)==get32(b_,16+len))r.push_back({get64(b_,4),std::move(s),{},{} });
+    b_.erase(b_.begin(),b_.begin()+20+len);
+  }
+  return r;
+}
 Log::Log(std::filesystem::path p):path_(std::move(p)),out_(path_,std::ios::app|std::ios::binary){}
 bool Log::append(const Event&e){auto b=encode(e);std::lock_guard l(m_);if(!out_)return false;out_.write(reinterpret_cast<const char*>(b.data()),static_cast<std::streamsize>(b.size()));out_.flush();return out_.good();}
 std::uint64_t Log::recover(){std::lock_guard l(m_);std::ifstream in(path_,std::ios::binary);std::vector<std::uint8_t>b((std::istreambuf_iterator<char>(in)),{});std::size_t off=0,good=0;std::uint64_t next=1;while(off+20<=b.size()){if(get32(b,off)!=0x57523031u){++off;continue;}auto len=get32(b,off+12);if(len>1u<<20||b.size()-off<20+len)break;std::string payload(b.begin()+static_cast<std::ptrdiff_t>(off+16),b.begin()+static_cast<std::ptrdiff_t>(off+16+len));if(checksum(payload)==get32(b,off+16+len)){auto id=get64(b,off+4);if(id==std::numeric_limits<std::uint64_t>::max())throw std::overflow_error("event id exhausted");next=std::max(next,id+1);off+=20+len;good=off;}else ++off;}in.close();std::error_code ec;std::filesystem::resize_file(path_,good,ec);out_.close();out_.open(path_,std::ios::app|std::ios::binary);return next;}
@@ -31,7 +46,21 @@ std::vector<Event> Log::replay()const{std::lock_guard l(m_);std::ifstream in(pat
 void Metrics::inc(std::string n){std::lock_guard l(m_);++v_[std::move(n)];}
 std::string Metrics::prometheus()const{std::lock_guard l(m_);std::ostringstream o;for(auto&[k,v]:v_)o<<"weir_"<<k<<" "<<v<<"\n";return o.str();}
 void log(std::string_view l,std::string_view m){auto now=std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());std::cout<<"{\"ts\":"<<now<<",\"level\":\""<<l<<"\",\"msg\":\""<<m<<"\"}\n"<<std::flush;}
-Pipeline::Pipeline(Log&l,Metrics&m,unsigned n):log_(l),metrics_(m){if(n==0)throw std::invalid_argument("workers must be greater than zero");persister_=std::thread([this]{while(auto e=durable_.pop()){bool ok=log_.append(*e);if(e->durable_ack)e->durable_ack->set_value(ok);if(e->durable_completion)e->durable_completion(ok);if(ok){metrics_.inc("durable_total");process_.push(std::move(*e));}}});for(unsigned i=0;i<n;++i)workers_.emplace_back([this]{while(auto e=process_.pop()){metrics_.inc("processed_total");(void)e;}});}
+Pipeline::Pipeline(Log&l,Metrics&m,unsigned n):log_(l),metrics_(m){
+  if(n==0)throw std::invalid_argument("workers must be greater than zero");
+  // Test-only hook: delays ACK delivery so async-lifetime races become
+  // deterministic in integration tests. Inert unless the env var is set.
+  std::uint64_t ack_delay_ms=0;
+  if(const char* d=std::getenv("WEIR_TEST_ACK_DELAY_MS"))ack_delay_ms=std::strtoull(d,nullptr,10);
+  persister_=std::thread([this,ack_delay_ms]{while(auto e=durable_.pop()){
+    bool ok=log_.append(*e);
+    if(ack_delay_ms>0)std::this_thread::sleep_for(std::chrono::milliseconds(ack_delay_ms));
+    if(e->durable_ack)e->durable_ack->set_value(ok);
+    if(e->durable_completion)e->durable_completion(ok);
+    if(ok){metrics_.inc("durable_total");process_.push(std::move(*e));}
+  }});
+  for(unsigned i=0;i<n;++i)workers_.emplace_back([this]{while(auto e=process_.pop()){metrics_.inc("processed_total");(void)e;}});
+}
 Pipeline::~Pipeline(){durable_.close();if(persister_.joinable())persister_.join();process_.close();for(auto&t:workers_)if(t.joinable())t.join();}
 bool Pipeline::submit(Event e){metrics_.inc("validated_total");return durable_.push(std::move(e));}
 #ifdef __linux__
@@ -158,35 +187,34 @@ int run_server(unsigned port,Log&lf,Metrics&m,std::atomic<bool>&stop,unsigned wo
       if(events&(EPOLLHUP|EPOLLRDHUP)&&!(events&EPOLLIN))c.read_open=false;
       if(events&EPOLLIN){
         bool conn_gone=false;
-        try{
-          std::uint8_t buf[4096];
-          for(;;){
-            auto r=recv(fd,buf,sizeof buf,0);
-            if(r==0){c.read_open=false;break;}
-            if(r<0){
-              if(errno==EINTR)continue;
-              if(errno==EAGAIN||errno==EWOULDBLOCK)break;
-              drop(fd);
-              conn_gone=true;
-              break;
-            }
-            for(auto& e:c.parser.feed(buf,static_cast<std::size_t>(r))){
-              e.id=next++;
-              auto g=c.gen;
-              ++c.pending;
-              e.durable_completion=[&,fd,g,id=e.id](bool ok){
-                std::lock_guard l(cm);
-                done.emplace_back(fd,g,id,ok);
-                std::uint64_t x=1;
-                write(wake,&x,sizeof x);
-              };
-              if(!pipe->submit(std::move(e))){drop(fd);conn_gone=true;break;}
-            }
-            if(conn_gone)break;
+        std::uint8_t buf[4096];
+        for(;;){
+          auto r=recv(fd,buf,sizeof buf,0);
+          if(r==0){c.read_open=false;break;}
+          if(r<0){
+            if(errno==EINTR)continue;
+            if(errno==EAGAIN||errno==EWOULDBLOCK)break;
+            drop(fd);
+            conn_gone=true;
+            break;
           }
-        }catch(const std::exception&){
-          drop(fd);
-          conn_gone=true;
+          auto parsed=c.parser.feed(buf,static_cast<std::size_t>(r));
+          for(auto& e:parsed){
+            e.id=next++;
+            auto g=c.gen;
+            ++c.pending;
+            e.durable_completion=[&,fd,g,id=e.id](bool ok){
+              std::lock_guard l(cm);
+              done.emplace_back(fd,g,id,ok);
+              std::uint64_t x=1;
+              write(wake,&x,sizeof x);
+            };
+            if(!pipe->submit(std::move(e))){drop(fd);conn_gone=true;break;}
+          }
+          if(conn_gone)break;
+          // A malformed frame poisons this connection only: valid events
+          // decoded before it were already submitted above.
+          if(c.parser.bad()){drop(fd);conn_gone=true;break;}
         }
         if(conn_gone)continue;
         if(!c.read_open)update_interest(fd);

@@ -21,7 +21,7 @@ namespace weir {
 struct Event { std::uint64_t id{}; std::string payload; std::shared_ptr<std::promise<bool>> durable_ack; std::function<void(bool)> durable_completion; };
 std::uint32_t checksum(std::string_view s);
 std::vector<std::uint8_t> encode(const Event& e);
-class Parser { std::vector<std::uint8_t> b_; public: std::vector<Event> feed(const std::uint8_t*, std::size_t); };
+class Parser { std::vector<std::uint8_t> b_; bool bad_=false; public: std::vector<Event> feed(const std::uint8_t*, std::size_t); bool bad() const { return bad_; } };
 
 template<class T> class BoundedQueue {
  std::mutex m_; std::condition_variable cv_, space_; std::deque<T> q_; std::size_t cap_; bool closed_=false;
