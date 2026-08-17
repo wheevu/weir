@@ -210,11 +210,48 @@ def scenario_coalesced_frames(server_bin, inspect_bin):
         srv.stop()
 
 
+def scenario_half_close_final_frame(server_bin, inspect_bin):
+    """Valid frame + immediate SHUT_WR must preserve the frame and deliver
+    its ACK. Baseline lost 39/40 trials; the fix must hold across 30."""
+    srv = Server(server_bin, inspect_bin)
+    trials = 30
+    try:
+        for i in range(trials):
+            c = connect(srv.port)
+            c.sendall(make_frame(100 + i, b"final-frame"))
+            c.shutdown(socket.SHUT_WR)
+            ids = recv_ack_ids(c, 1)
+            c.close()
+            assert ids == [i + 1], (i, ids)
+        assert "records=%d" % trials in srv.inspect_log(), srv.inspect_log()
+    finally:
+        srv.stop()
+
+
+def scenario_ack_after_half_close(server_bin, inspect_bin):
+    """Several events, then SHUT_WR: all earned ACKs must arrive even though
+    persistence completions land after the peer stopped sending."""
+    srv = Server(server_bin, inspect_bin)
+    try:
+        c = connect(srv.port)
+        for i in range(5):
+            c.sendall(make_frame(200 + i, b"multi-%d" % i))
+        c.shutdown(socket.SHUT_WR)
+        ids = recv_ack_ids(c, 5)
+        c.close()
+        assert ids == [1, 2, 3, 4, 5], ids
+        assert "records=5" in srv.inspect_log(), srv.inspect_log()
+    finally:
+        srv.stop()
+
+
 SCENARIOS = {
     "metrics_endpoint": scenario_metrics,
     "valid_frame": scenario_valid_frame,
     "fragmented_frame": scenario_fragmented_frame,
     "coalesced_frames": scenario_coalesced_frames,
+    "half_close_final_frame": scenario_half_close_final_frame,
+    "ack_after_half_close": scenario_ack_after_half_close,
 }
 
 

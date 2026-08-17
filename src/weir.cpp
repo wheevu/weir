@@ -36,12 +36,176 @@ Pipeline::~Pipeline(){durable_.close();if(persister_.joinable())persister_.join(
 bool Pipeline::submit(Event e){metrics_.inc("validated_total");return durable_.push(std::move(e));}
 #ifdef __linux__
 int run_server(unsigned port,Log&lf,Metrics&m,std::atomic<bool>&stop,unsigned workers){
- if(port==0||port>65535){return 2;}int s=socket(AF_INET,SOCK_STREAM|SOCK_NONBLOCK,0);if(s<0){return 1;}int yes=1;setsockopt(s,SOL_SOCKET,SO_REUSEADDR,&yes,sizeof yes);sockaddr_in a{};a.sin_family=AF_INET;a.sin_port=htons(static_cast<std::uint16_t>(port));a.sin_addr.s_addr=INADDR_ANY;if(bind(s,reinterpret_cast<sockaddr*>(&a),sizeof a)||listen(s,64)){close(s);return 1;}int ep=epoll_create1(0),wake=eventfd(0,EFD_NONBLOCK);if(ep<0||wake<0){if(ep>=0)close(ep);if(wake>=0)close(wake);close(s);return 1;}
- epoll_event ev{};ev.events=EPOLLIN;ev.data.fd=s;epoll_ctl(ep,EPOLL_CTL_ADD,s,&ev);epoll_event we{};we.events=EPOLLIN;we.data.fd=wake;epoll_ctl(ep,EPOLL_CTL_ADD,wake,&we);
-  std::map<int,Parser>ps;std::map<int,std::string>out;std::map<int,std::uint64_t>gen,next_gen;std::mutex cm;std::deque<std::tuple<int,std::uint64_t,std::uint64_t,bool>>done;std::vector<epoll_event>es(32);std::uint64_t next=lf.recover();
-  auto drop=[&](int fd){epoll_ctl(ep,EPOLL_CTL_DEL,fd,nullptr);close(fd);ps.erase(fd);out.erase(fd);gen.erase(fd);};
+  if(port==0||port>65535){return 2;}
+  int s=socket(AF_INET,SOCK_STREAM|SOCK_NONBLOCK,0);
+  if(s<0){return 1;}
+  int yes=1;
+  setsockopt(s,SOL_SOCKET,SO_REUSEADDR,&yes,sizeof yes);
+  sockaddr_in a{};
+  a.sin_family=AF_INET;
+  a.sin_port=htons(static_cast<std::uint16_t>(port));
+  a.sin_addr.s_addr=htonl(INADDR_ANY);
+  if(bind(s,reinterpret_cast<sockaddr*>(&a),sizeof a)!=0||listen(s,64)!=0){close(s);return 1;}
+  int ep=epoll_create1(0),wake=eventfd(0,EFD_NONBLOCK);
+  if(ep<0||wake<0){if(ep>=0)close(ep);if(wake>=0)close(wake);close(s);return 1;}
+  epoll_event ev{};
+  ev.events=EPOLLIN;
+  ev.data.fd=s;
+  epoll_ctl(ep,EPOLL_CTL_ADD,s,&ev);
+  epoll_event we{};
+  we.events=EPOLLIN;
+  we.data.fd=wake;
+  epoll_ctl(ep,EPOLL_CTL_ADD,wake,&we);
+
+  // Per-connection state, owned exclusively by the epoll thread.
+  // gen is a monotonic identity that is never reused, so an async
+  // persistence completion can never target a later connection that
+  // happens to reuse the same numeric fd.
+  struct Conn {
+    Parser parser;
+    std::string out;          // pending outbound ACK/ERR bytes
+    std::uint64_t gen=0;
+    bool read_open=true;      // peer may still send; false after EOF
+    std::uint64_t pending=0;  // persistence completions outstanding
+  };
+  std::map<int,Conn> conns;
+  std::uint64_t next_gen=0;
+  std::mutex cm;
+  std::deque<std::tuple<int,std::uint64_t,std::uint64_t,bool>> done;
+  std::vector<epoll_event> es(32);
+  std::uint64_t next=lf.recover();
+
   auto pipe=std::make_unique<Pipeline>(lf,m,workers);
-  while(!stop){int n=epoll_wait(ep,es.data(),static_cast<int>(es.size()),100);if(n<0&&errno==EINTR)continue;for(int i=0;i<n;++i){int fd=static_cast<int>(es[static_cast<std::size_t>(i)].data.u64);if(fd==wake){std::uint64_t x;read(wake,&x,sizeof x);std::lock_guard l(cm);while(!done.empty()){auto[c,g,id,ok]=done.front();done.pop_front();auto active=gen.find(c);if(active!=gen.end()&&active->second==g&&out.find(c)!=out.end()){std::string msg=ok?"OK "+std::to_string(id)+"\n":"ERR persistence\n";if(out[c].size()+msg.size()>1024*1024){drop(c);continue;}out[c]+=msg;epoll_event ce{};ce.events=EPOLLIN|EPOLLOUT|EPOLLRDHUP;ce.data.fd=c;epoll_ctl(ep,EPOLL_CTL_MOD,c,&ce);}}}else if(fd==s){for(;;){int c=accept4(s,nullptr,nullptr,SOCK_NONBLOCK);if(c<0)break;gen[c]=++next_gen[c];ps.emplace(c,Parser{});epoll_event ce{};ce.events=EPOLLIN|EPOLLRDHUP;ce.data.fd=c;epoll_ctl(ep,EPOLL_CTL_ADD,c,&ce);}}else if(gen.count(fd)){bool dead=(es[static_cast<std::size_t>(i)].events&(EPOLLERR|EPOLLHUP|EPOLLRDHUP))!=0;if(!dead&&(es[static_cast<std::size_t>(i)].events&EPOLLIN)){try{std::uint8_t buf[4096];for(;;){auto r=recv(fd,buf,sizeof buf,0);if(r<=0)break;for(auto&e:ps[fd].feed(buf,static_cast<std::size_t>(r))){e.id=next++;auto g=gen[fd];e.durable_completion=[&,fd,g,id=e.id](bool ok){std::lock_guard l(cm);done.emplace_back(fd,g,id,ok);std::uint64_t x=1;write(wake,&x,sizeof x);};if(!pipe->submit(std::move(e)))drop(fd);}}}catch(const std::exception&){drop(fd);}if(!gen.count(fd))continue;}if(!dead&&(es[static_cast<std::size_t>(i)].events&EPOLLOUT)){auto&w=out[fd];auto r=send(fd,w.data(),w.size(),MSG_NOSIGNAL);if(r>0)w.erase(0,static_cast<std::size_t>(r));if(w.empty()){epoll_event ce{};ce.events=EPOLLIN|EPOLLRDHUP;ce.data.fd=fd;epoll_ctl(ep,EPOLL_CTL_MOD,fd,&ce);}}if(dead||(!out[fd].empty()&&send(fd,"",0,MSG_NOSIGNAL)<0&&errno==EPIPE))drop(fd);}}}
+
+  auto drop=[&](int fd){
+    auto it=conns.find(fd);
+    if(it==conns.end())return;  // exactly-once teardown
+    epoll_ctl(ep,EPOLL_CTL_DEL,fd,nullptr);
+    close(fd);
+    conns.erase(it);
+  };
+
+  // Derive the epoll interest mask from connection state. EPOLLOUT is armed
+  // only while outbound bytes are pending, so an idle or readable socket
+  // cannot busy-loop the loop.
+  auto update_interest=[&](int fd){
+    auto it=conns.find(fd);
+    if(it==conns.end())return;
+    std::uint32_t want=EPOLLRDHUP;
+    if(it->second.read_open)want|=EPOLLIN;
+    if(!it->second.out.empty())want|=EPOLLOUT;
+    epoll_event ce{};
+    ce.events=want;
+    ce.data.fd=fd;
+    if(epoll_ctl(ep,EPOLL_CTL_MOD,fd,&ce)!=0){
+      log("error","epoll MOD failed: "+std::string(std::strerror(errno)));
+    }
+  };
+
+  // A connection may be destroyed only when every dependency is gone:
+  // the peer finished sending, no persistence completions are pending,
+  // and no outbound bytes remain queued.
+  auto maybe_close=[&](int fd){
+    auto it=conns.find(fd);
+    if(it==conns.end())return;
+    const auto& c=it->second;
+    if(!c.read_open&&c.pending==0&&c.out.empty())drop(fd);
+  };
+  while(!stop){
+    int n=epoll_wait(ep,es.data(),static_cast<int>(es.size()),100);
+    if(n<0){if(errno==EINTR)continue;continue;}
+    for(int i=0;i<n;++i){
+      int fd=static_cast<int>(es[static_cast<std::size_t>(i)].data.u64);
+      std::uint32_t events=es[static_cast<std::size_t>(i)].events;
+      if(fd==wake){
+        std::uint64_t x;
+        read(wake,&x,sizeof x);
+        std::lock_guard l(cm);
+        while(!done.empty()){
+          auto[c,g,id,ok]=done.front();
+          done.pop_front();
+          auto it=conns.find(c);
+          if(it==conns.end())continue;    // connection already gone
+          if(it->second.gen!=g)continue;  // fd reused by another connection
+          if(it->second.pending>0)--it->second.pending;
+          std::string msg=ok?"OK "+std::to_string(id)+"\n":"ERR persistence\n";
+          if(it->second.out.size()+msg.size()>1024*1024){drop(c);continue;}
+          it->second.out+=msg;
+          update_interest(c);
+        }
+        continue;
+      }
+      if(fd==s){
+        for(;;){
+          int c=accept4(s,nullptr,nullptr,SOCK_NONBLOCK);
+          if(c<0)break;
+          Conn nc;
+          nc.gen=++next_gen;
+          conns.emplace(c,std::move(nc));
+          epoll_event ce{};
+          ce.events=EPOLLIN|EPOLLRDHUP;
+          ce.data.fd=c;
+          if(epoll_ctl(ep,EPOLL_CTL_ADD,c,&ce)!=0){close(c);conns.erase(c);}
+        }
+        continue;
+      }
+      auto it=conns.find(fd);
+      if(it==conns.end())continue;
+      Conn& c=it->second;
+      if(events&EPOLLERR){drop(fd);continue;}
+      // A peer write-half close is a state transition, not death. If readable
+      // data is also pending, drain it first; recv() reports the EOF.
+      if(events&(EPOLLHUP|EPOLLRDHUP)&&!(events&EPOLLIN))c.read_open=false;
+      if(events&EPOLLIN){
+        bool conn_gone=false;
+        try{
+          std::uint8_t buf[4096];
+          for(;;){
+            auto r=recv(fd,buf,sizeof buf,0);
+            if(r==0){c.read_open=false;break;}
+            if(r<0){
+              if(errno==EINTR)continue;
+              if(errno==EAGAIN||errno==EWOULDBLOCK)break;
+              drop(fd);
+              conn_gone=true;
+              break;
+            }
+            for(auto& e:c.parser.feed(buf,static_cast<std::size_t>(r))){
+              e.id=next++;
+              auto g=c.gen;
+              ++c.pending;
+              e.durable_completion=[&,fd,g,id=e.id](bool ok){
+                std::lock_guard l(cm);
+                done.emplace_back(fd,g,id,ok);
+                std::uint64_t x=1;
+                write(wake,&x,sizeof x);
+              };
+              if(!pipe->submit(std::move(e))){drop(fd);conn_gone=true;break;}
+            }
+            if(conn_gone)break;
+          }
+        }catch(const std::exception&){
+          drop(fd);
+          conn_gone=true;
+        }
+        if(conn_gone)continue;
+        if(!c.read_open)update_interest(fd);
+      }
+      if(!conns.count(fd))continue;
+      if((events&EPOLLOUT)&&!c.out.empty()){
+        auto r=send(fd,c.out.data(),c.out.size(),MSG_NOSIGNAL);
+        if(r>0){
+          c.out.erase(0,static_cast<std::size_t>(r));
+        }else if(r<0&&errno!=EAGAIN&&errno!=EWOULDBLOCK&&errno!=EINTR){
+          drop(fd);
+          continue;
+        }
+        update_interest(fd);
+      }
+      if(!conns.count(fd))continue;
+      maybe_close(fd);
+    }
+  }
   // Stop Pipeline callbacks before closing the wake fd they signal.
   pipe.reset();
   close(wake);close(ep);close(s);
