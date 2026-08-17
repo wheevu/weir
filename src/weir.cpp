@@ -197,6 +197,13 @@ int run_server(unsigned port,Log&lf,Metrics&m,std::atomic<bool>&stop,unsigned wo
           Conn nc;
           nc.gen=++next_gen;
           conns.emplace(c,std::move(nc));
+          // Test-only hook: shrink the socket send buffer so integration
+          // tests can deterministically force partial nonblocking sends.
+          // Inert unless the env var is set.
+          if(const char* sb=std::getenv("WEIR_TEST_SNDBUF")){
+            int v=std::atoi(sb);
+            if(v>0)setsockopt(c,SOL_SOCKET,SO_SNDBUF,&v,sizeof v);
+          }
           epoll_event ce{};
           ce.events=EPOLLIN|EPOLLRDHUP;
           ce.data.fd=c;

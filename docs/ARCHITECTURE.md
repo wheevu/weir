@@ -50,4 +50,4 @@ Persistence runs on the pipeline thread; completions are marshalled to the epoll
 
 ### Teardown paths
 
-Every path (client close, half-close drain, malformed frame, fatal socket error, shutdown) funnels through a single `drop()` that removes the epoll registration, closes the fd, and erases the connection exactly once. Malformed input from one client can only poison that client's parser; the server and all other connections are unaffected.
+Every path (client close, half-close drain, malformed frame, fatal socket error) funnels through a single `drop()` that removes the epoll registration, closes the fd, and erases the connection exactly once. Process shutdown closes every remaining client fd directly before the event loop exits. Malformed input from one client can only poison that client's parser; the server and all other connections are unaffected.

@@ -249,14 +249,13 @@ def scenario_ack_after_half_close(server_bin, inspect_bin):
 
 
 def scenario_fd_reuse_guard(server_bin, inspect_bin):
-    """A stale persistence completion must never reach a new connection that
-    reuses the old connection's fd number.
+    """A stale persistence completion must never reach a new connection.
 
     Deterministic setup: client A submits an event whose ACK is delayed
     (WEIR_TEST_ACK_DELAY_MS), then triggers a server-side drop via an
     oversized length field. A's connection is destroyed while its completion
-    is still in flight. After a churn of connections, B owns the same fd
-    number when A's stale completion fires. B must never see A's ACK.
+    is still in flight. Churn connections follow, then B connects; A's stale
+    completion fires while B is live. B must never see A's ACK.
     """
     srv = Server(server_bin, inspect_bin,
                  extra_env={"WEIR_TEST_ACK_DELAY_MS": "400"})
@@ -384,11 +383,13 @@ def scenario_slow_reader(server_bin, inspect_bin):
     client shrinks its receive window so the server's ACK path must
     experience real send-buffer pressure.
     """
-    srv = Server(server_bin, inspect_bin)
+    srv = Server(server_bin, inspect_bin,
+                 extra_env={"WEIR_TEST_SNDBUF": "8192"})
     count = 4000
     try:
         c = connect(srv.port, timeout=60)
         c.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+        c.setsockopt(socket.SOL_TCP, socket.TCP_WINDOW_CLAMP, 4096)
         for chunk_start in range(0, count, 500):
             buf = b"".join(make_frame(10000 + i, b"x" * 1024)
                            for i in range(chunk_start, chunk_start + 500))
