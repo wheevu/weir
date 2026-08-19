@@ -28,4 +28,9 @@ Do not publish a result when a run has dropped connections or silently rejected 
 ## Current status
 
 All three backends (epoll, coroutine, io_uring) pass the full integration suite on Linux, including the slow-reader scenario, seeded io_uring failpoint stress, and ASan/UBSan runs.
-The benchmark harness is implemented but comparative measurements are not yet recorded (see the shootout doc).
+The comparative campaign has been measured once (2026-08-20): 3 backends x 4 connection levels x 3 samples, 30 s each with a 5 s warmup, payload 1024 B, window 32, on Ubuntu 24.04 ARM64 (kernel 7.0.0-28, g++ 15.2, git ffd5174).
+Raw JSON, environment metadata, and the bench binary checksum are saved in `results/bench/`; results and interpretation are in `docs/IOURING-SHOOTOUT.md`.
+
+The campaign run deviates from the publication rules above in two ways: samples are 30 s (rule 4 asks for three five-minute samples), and the warmup is 5 s (rule 3 asks for 30 s).
+The 30 s samples are consistent across all three replicates per cell, but the five-minute protocol remains the bar for publishing absolute numbers.
+Run rules 1, 2, 5, and 6 were followed: single fixed VM configuration, raised fd limit, identical payload/client/persistence for every backend, and full provenance saved beside the results.
