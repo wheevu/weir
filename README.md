@@ -30,8 +30,9 @@ Stable-storage durability and crash-recovery guarantees are still under developm
 - Metrics HTTP endpoint on 127.0.0.1
 - Linux process/socket integration tests
 - ASan/UBSan and Valgrind-clean tested paths
+- Initial backend campaign recorded: 3 backends x 4 connection levels, raw HDR results in [docs/IOURING-SHOOTOUT.md](docs/IOURING-SHOOTOUT.md)
 
-Still in progress: `fdatasync` durability, process-level crash recovery, Prometheus/Grafana deployment, full observability, and performance characterization.
+Still in progress: `fdatasync` durability, process-level crash recovery, Prometheus/Grafana deployment, full observability, and the five-minute publication-protocol benchmark runs (initial campaign in [docs/IOURING-SHOOTOUT.md](docs/IOURING-SHOOTOUT.md)).
 
 ## **Overview**
 
