@@ -80,6 +80,23 @@ std::uint32_t poll_mask(std::uint32_t interest) {
   return static_cast<std::uint32_t>((interest & Read ? POLLIN | POLLPRI | POLLRDHUP : 0) |
                                     (interest & Write ? POLLOUT : 0));
 }
+// Ring capacity for poll slots. The default must comfortably exceed the
+// number of concurrent connections, because each connection holds one poll
+// while it has data pending, and a connection whose poll cannot be armed
+// waits until a slot frees. With a 256-entry ring and 1,000+ connections,
+// most connections wait multiple loop cycles, which showed up as a p999
+// latency tail 10-40x worse than epoll's. WEIR_URING_RING_SIZE overrides
+// the default for experiments; the ring is fixed at construction.
+unsigned ring_entries() {
+  unsigned entries = 4096;
+  if (const char* value = std::getenv("WEIR_URING_RING_SIZE")) {
+    char* end = nullptr;
+    const unsigned long parsed = std::strtoul(value, &end, 10);
+    if (end != value && *end == '\0' && parsed >= 256 && parsed <= 32768)
+      entries = static_cast<unsigned>(parsed);
+  }
+  return entries;
+}
 // Token layout: handle in bits 0-31, poll generation in bits 32-62.
 // Bit 63 is reserved for cancel tokens, so a poll token can never be
 // classified as a cancel even after generation wraps (31-bit generation).
@@ -124,7 +141,7 @@ struct UringTransport::Impl {
   std::size_t pending_reconciles{0};
   std::uint64_t iterations{0};
   TraceRing trace;
-  explicit Impl(std::size_t n) : ring(256), max_events(n == 0 ? 1 : n) {
+  explicit Impl(std::size_t n) : ring(ring_entries()), max_events(n == 0 ? 1 : n) {
     if (!ring.valid()) {
       error = ring.error();
       return;

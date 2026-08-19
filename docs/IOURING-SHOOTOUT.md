@@ -72,12 +72,37 @@ The transport choice shows up elsewhere.
 - io_uring uses the least memory: about 6.5 KB per connection at 20,000 connections versus 8.4 KB for epoll and 8.6 KB for coroutine.
 - io_uring pays with its latency tail: p999 is 10-40x worse than epoll/coroutine (2.6-13.3 ms versus 0.2-4.1 ms), and the observed maximum is 10-19 ms versus 0.2-5 ms.
   The tail is stable across all three samples at every level, so it is a property of the backend under saturation, not noise.
-  Its mechanism is not yet investigated; the leading hypothesis is batching in the single ring drain loop rather than the 100 ms idle timeout.
+
+## Latency tail: cause and fix (2026-08-20)
+
+The tail was real and its cause is now known: the io_uring ring held only 256 poll slots while the benchmark runs 1,000-20,000 concurrent connections.
+Each connection with data pending holds one poll slot, and under load the armed polls are re-armed immediately, so the slots stay with whichever connections got them first.
+Connections beyond the first 256 wait one or more loop cycles for a slot, which appears as a multi-millisecond tail.
+epoll has no such cap: every file descriptor is registered with the kernel at once.
+
+The fix sizes the ring for the connection scale: the default is now 4096 entries, tunable with `WEIR_URING_RING_SIZE` (256-32768) for experiments.
+Ring memory is ~0.4 MB at 4096 entries, which is negligible.
+
+Verified by A/B on the same host within the same minute (details in `results/bench/ring-ab.md`):
+
+| connections | p999 with 256 slots | p999 with 4096 slots |
+|------------:|--------------------:|---------------------:|
+| 1,000 | 2.34 ms | 0.28 ms |
+| 5,000 | 8.20 ms | 3.11 ms |
+
+The 1,000-connection case also shows max latency dropping from 18.7 ms to 0.29 ms (66x), and admission improving from 37% to 31% rejected.
+The tail at 1,000 connections is now at epoll's level (0.28 ms vs 0.22 ms).
+Regression coverage: full integration suite and 20/20 seeded io_uring failpoint stress pass on the changed transport.
+
+The 10,000- and 20,000-connection rows still need a clean re-run: the machine ran on battery power during the verification, which throttled absolute throughput roughly 2x and added host-level stalls above ~10 ms.
+At 20,000 connections the slot fix trades differently: 4096 slots improve p50 (2.7 ms to 0.7 ms), admission (34% to 27% rejected), and memory (128 to 97 MB) but reduce throughput (112k to 73k ops/s) and leave p999 in the 12-22 ms range at every ring size from 256 to 8192.
+The server loop is not CPU-bound in any configuration (78-90% of one core), so the remaining 20,000-connection tail is a structural property of slot-based polling with a single drain loop, not a tuning miss.
 
 ## Open questions
 
-- Why does io_uring's p999 grow with connection count (2.6 ms at 1,000 to 13.3 ms at 20,000) while its p50 tracks epoll?
-- Does SQPOLL or a larger ring change the tail?
+- What exactly delays the reply path at 20,000 connections (write-poll re-arm under a full ring is the leading hypothesis)?
+- Does a second run-loop thread or a dedicated completion thread change the 20,000-connection trade-off?
+- Absolute re-measurement of all rows on a clean host (AC power, no memory pressure) with the 4096-slot default.
 
 ## Planned figures
 
@@ -88,7 +113,9 @@ The transport choice shows up elsewhere.
 
 ## Known limitations
 
-The current Lima environment is Ubuntu ARM64 with four virtual CPUs and six GiB of memory.
+The current Lima environment is Ubuntu ARM64 with four virtual CPUs and three GiB of memory.
 Results from this environment will not be presented as representative of x86 production hardware.
 Campaign samples are 30 s with a 5 s warmup; the publication protocol in BENCHMARK.md requires three five-minute samples per level.
+That protocol is infeasible at payload 1024 on this VM: the persistence log grows 1022 bytes per accepted event, so a single five-minute sample writes 29-46 GB, more than the VM's usable disk; a paced or smaller-payload variant is required first.
 The persistence log is fsync-free (write plus flush per event), so absolute numbers reflect that configuration.
+The Mac host throttles the VM on battery power (roughly 2x throughput loss); benchmark re-runs need AC power.
