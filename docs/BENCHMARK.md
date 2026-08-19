@@ -40,3 +40,10 @@ After the campaign, the io_uring latency tail was traced to the transport's fixe
 Verified by A/B at 1,000 and 5,000 connections (p999 2.34 to 0.28 ms and 8.2 to 3.1 ms) with the full integration suite and seeded failpoint stress green.
 The 10,000- and 20,000-connection rows still need a clean re-run: the verification ran on battery power with host memory pressure, which throttles absolute numbers about 2x.
 Re-runs must be on AC power with a quiet host; evidence in `results/bench/ring-ab.md`.
+
+### Five-minute protocol: the paced variant
+
+Rule 4 became feasible with the bench's `--rate` option (added 2026-08-20): a paced campaign paces the aggregate send rate instead of saturating, which keeps the persistence log within the VM disk.
+At 25,000 events/s the log grows ~25.5 MB/s (1022 B per accepted event), so a five-minute sample writes ~7.7 GB against ~26 GB usable; the unpaced protocol writes 29-46 GB per sample and remains infeasible on this VM.
+Pacing granularity is a 100 ms token-bucket burst (the transports' periodic wake), so p50 includes in-burst queueing; use the same `--rate` for every backend and record it with the results (the JSON now carries `rate`).
+A full three-backend x four-level x three-sample paced campaign takes about 3.3 hours and should run on AC power.

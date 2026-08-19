@@ -56,6 +56,7 @@ struct Options {
   unsigned warmup_s = 2;
   unsigned window = 32;
   unsigned payload = 16;
+  unsigned rate = 0;
   unsigned port = 0;
   unsigned metrics_port = 0;
 };
@@ -191,6 +192,11 @@ struct ClientContext {
   const std::int64_t deadline_ns;
   const std::int64_t warmup_end_ns;
   std::vector<ConnState> conns;
+  // Token bucket for --rate pacing, shared by all connections. The bucket
+  // refills continuously and caps the burst at one second's worth, so the
+  // aggregate send rate never exceeds `rate` events per second.
+  double tokens{0};
+  std::int64_t last_refill_ns{0};
 };
 
 // A connection is counted as failed at most once, on the alive-to-failed
@@ -221,6 +227,25 @@ std::int64_t now_ns() {
       .count();
 }
 
+// Consume one send token under --rate pacing. Unlimited when rate is 0.
+static bool take_token(ClientContext& ctx) {
+  if (ctx.options.rate == 0) return true;
+  const std::int64_t now = now_ns();
+  if (ctx.tokens < static_cast<double>(ctx.options.rate)) {
+    ctx.tokens +=
+        static_cast<double>(now - ctx.last_refill_ns) * ctx.options.rate /
+        1e9;
+    ctx.last_refill_ns = now;
+    if (ctx.tokens > static_cast<double>(ctx.options.rate))
+      ctx.tokens = static_cast<double>(ctx.options.rate);
+  }
+  if (ctx.tokens >= 1.0) {
+    ctx.tokens -= 1.0;
+    return true;
+  }
+  return false;
+}
+
 void update_interest(ClientContext& ctx, ConnState& c) {
   std::uint32_t interest = 0;
   if (!c.established) {
@@ -241,6 +266,7 @@ void try_send(ClientContext& ctx, ConnState& c) {
   // unsent stays in the outbox for the next writable pass.
   while (c.sent - c.received < ctx.options.window &&
          now_ns() < ctx.deadline_ns) {
+    if (!take_token(ctx)) break;
     c.outbox += make_frame(c.sent + 1, ctx.options.payload);
     c.sent_at.push_back(now_ns());
     ++c.sent;
@@ -378,6 +404,14 @@ weir::transport::RootTask run_load(ClientContext& ctx) {
         update_interest(ctx, c);
       }
     }
+    if (events.empty() && ctx.options.rate > 0) {
+      // Pacing pass: with no socket events, nothing would trigger try_send
+      // and the token bucket would never drain. Top up established
+      // connections on idle passes so the paced rate is actually sent.
+      for (auto& c : ctx.conns) {
+        if (!c.failed && !c.finishing && c.established) try_send(ctx, c);
+      }
+    }
     if (now_ns() >= ctx.deadline_ns) {
       for (auto& c : ctx.conns) c.finishing = true;
     }
@@ -405,7 +439,11 @@ bool parse_args(int argc, char** argv, Options& options) {
       std::cout
           << "usage: weir_bench --server PATH --backend NAME\n"
           << "  [--connections N] [--duration S] [--warmup S] [--window K]\n"
-          << "  [--payload N] [--out FILE]\n";
+          << "  [--payload N] [--rate N] [--out FILE]\n"
+          << "  --rate N paces the aggregate send rate to N events/s\n"
+          << "  (0 = unlimited, the default; needed for five-minute\n"
+          << "  publication runs, whose log would outgrow the disk at\n"
+          << "  full saturation)\n";
       return false;
     }
     const char* value = require(i);
@@ -417,7 +455,8 @@ bool parse_args(int argc, char** argv, Options& options) {
     } else if (a == "--out") {
       options.out_path = value;
     } else if (a == "--connections" || a == "--duration" ||
-               a == "--warmup" || a == "--window" || a == "--payload") {
+               a == "--warmup" || a == "--window" || a == "--payload" ||
+               a == "--rate") {
       char* end = nullptr;
       const unsigned long v = std::strtoul(value, &end, 10);
       if (end == value || *end != '\0' || v > 1'000'000U) return false;
@@ -429,6 +468,8 @@ bool parse_args(int argc, char** argv, Options& options) {
         options.warmup_s = static_cast<unsigned>(v);
       else if (a == "--window")
         options.window = static_cast<unsigned>(v);
+      else if (a == "--rate")
+        options.rate = static_cast<unsigned>(v);
       else
         options.payload = static_cast<unsigned>(v);
     } else {
@@ -526,13 +567,14 @@ int main(int argc, char** argv) {
   char result[4096];
   snprintf(result, sizeof(result),
            "{\"backend\":\"%s\",\"connections\":%u,\"payload\":%u,"
-           "\"window\":%u,\"duration_s\":%.3f,\"warmup_s\":%u,"
+           "\"window\":%u,\"rate\":%u,\"duration_s\":%.3f,\"warmup_s\":%u,"
            "\"ops\":%llu,\"err_replies\":%llu,"
            "\"throughput_ops_s\":%.1f,\"p50_us\":%.3f,\"p90_us\":%.3f,"
            "\"p99_us\":%.3f,\"p999_us\":%.3f,\"max_us\":%.3f,"
            "\"rss_kb\":%llu,\"failed_conns\":%llu,\"server_exit\":%d}\n",
            json_escape(options.backend).c_str(), options.connections,
-           options.payload, options.window, wall_s, options.warmup_s,
+           options.payload, options.window, options.rate, wall_s,
+           options.warmup_s,
            static_cast<unsigned long long>(stats.ops),
            static_cast<unsigned long long>(stats.err_replies), throughput,
            p50, p90, p99, p999, max_us,
