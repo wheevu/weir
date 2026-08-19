@@ -5,13 +5,13 @@ Weir is a small Linux-first C++20 event-ingestion service.
 
 ![Weir architecture](docs/ARCHITECTURE.svg)
 
-**Verified on Linux/ARM64:** real TCP/epoll transport, fragmented streams, half-closes, asynchronous acknowledgements, concurrent clients, partial nonblocking writes, and metrics HTTP behavior are covered by process/socket integration tests.
+**Verified on Linux/ARM64:** three runnable transports - a legacy `epoll` server, a C++20 coroutine server over `epoll`, and the same coroutine server over `io_uring` poll mode - plus fragmented streams, half-closes, asynchronous acknowledgements, concurrent clients, partial nonblocking writes, and metrics HTTP behavior, all covered by process/socket integration tests.
 
 Stable-storage durability and crash-recovery guarantees are still under development.
 
 ## What it demonstrates
 
-- Linux networking with nonblocking TCP and `epoll`
+- Linux networking with nonblocking TCP across three backends: legacy `epoll`, C++20 coroutines over `epoll`, and coroutines over `io_uring` (`--backend epoll|coroutine|io_uring`)
 - Incremental framing over a byte stream
 - Bounded concurrent queues with explicit capacity limits
 - Persistence before processing acknowledgement
@@ -23,6 +23,8 @@ Stable-storage durability and crash-recovery guarantees are still under developm
 
 - GCC 13.3 and Clang 18.1 with strict warnings
 - Real nonblocking TCP/epoll transport (syscalls confirmed with `strace`)
+- C++20 coroutine server: single run loop, awaitable sockets, no blocking calls
+- `io_uring` poll-mode transport with configurable ring size and seeded failpoint stress (CI, 20 seeds)
 - Fragmented and coalesced TCP frames
 - TCP half-close with pending asynchronous ACKs
 - Partial nonblocking response writes
@@ -44,6 +46,8 @@ Still in progress: `fdatasync` durability, process-level crash recovery, Prometh
 
 The service is intentionally single-process and has no runtime dependency beyond libc and pthreads.
 
+The server runs one of three backends: the legacy epoll server, the coroutine server on epoll, or the coroutine server on io_uring poll mode. The benchmark campaign in [docs/IOURING-SHOOTOUT.md](docs/IOURING-SHOOTOUT.md) compares them on admission, latency, and memory.
+
 The lifecycle is validated, queued, appended and flushed, acknowledged, queued for processing, and handled by workers.
 
 ## Event lifecycle
@@ -63,15 +67,16 @@ Requirements: CMake 3.20+ and a C++20 compiler.
 
 Use `cmake --preset asan` for AddressSanitizer and UBSan.
 
-Linux runtime integration tests are disabled by default because the server uses Linux epoll APIs.
+Linux runtime integration tests are disabled by default because the server uses Linux-specific networking APIs (`epoll`, `io_uring`).
 Enable them on Linux with `-DWEIR_LINUX_INTEGRATION_TESTS=ON` when configuring CMake, then run `ctest --preset default` to include real-socket transport scenarios (fragmentation, half-close, fd reuse, slow readers, malformed-client isolation).
 
-Linux provides the nonblocking TCP/epoll server on port 9000. macOS builds the core and CLI tools, but the server reports that networking is unavailable.
+Linux provides the nonblocking TCP server (epoll, coroutine, or io_uring backend) on port 9000. macOS builds the core and CLI tools, but the server reports that networking is unavailable.
 
 The binary frame is: magic `WR01`, big-endian event id, big-endian payload length, payload, and FNV-1a checksum.
 
 ```sh
 ./build-make/weir-server --port 9000 --log events.wrl
+./build-make/weir-server --port 9000 --log events.wrl --backend io_uring
 ./build-make/weir-producer 127.0.0.1 9000 hello
 ./build-make/weir-inspect-log events.wrl
 ./build-make/weir-replay events.wrl
