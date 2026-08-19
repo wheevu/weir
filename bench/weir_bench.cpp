@@ -117,7 +117,11 @@ pid_t spawn_server(const Options& options, int& status_pipe_out) {
     close(pipe_fds[1]);
     std::string port = std::to_string(options.port);
     std::string metrics = std::to_string(options.metrics_port);
-    std::string log = "/tmp/weir-bench-" + std::to_string(getpid()) + ".log";
+    // Disk-backed directory: /tmp is tmpfs on modern Ubuntu and the
+    // persistence log grows ~660 bytes per accepted event, so a campaign
+    // run can write gigabytes. The log is scratch state for the bench run
+    // and is unlinked once the server exits.
+    std::string log = "/var/tmp/weir-bench-" + std::to_string(getpid()) + ".log";
     execl(options.server_bin.c_str(), options.server_bin.c_str(), "--port",
           port.c_str(), "--metrics-port", metrics.c_str(), "--log",
           log.c_str(), "--backend", options.backend.c_str(), nullptr);
@@ -500,6 +504,8 @@ int main(int argc, char** argv) {
   waitpid(server_pid, &status, 0);
   const int server_exit = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
   if (status_pipe >= 0) close(status_pipe);
+  std::string log = "/var/tmp/weir-bench-" + std::to_string(server_pid) + ".log";
+  unlink(log.c_str());
 
   const double measured_s =
       std::max(wall_s - static_cast<double>(options.warmup_s), 0.001);
