@@ -210,7 +210,7 @@ int run_server_with_transport(unsigned port, Log& log, Metrics& metrics,
   address.sin_port = htons(static_cast<std::uint16_t>(port));
   address.sin_addr.s_addr = htonl(INADDR_ANY);
   if (bind(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0 ||
-      listen(fd, 256) != 0) { close(fd); return 1; }
+      listen(fd, 4096) != 0) { close(fd); return 1; }
   Transport io;
   CoroutineServer<Transport> server{io, log, metrics, stop, workers};
   server.listener = io.listen(fd);

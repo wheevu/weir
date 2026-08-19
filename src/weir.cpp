@@ -89,7 +89,7 @@ int run_server(unsigned port,Log&lf,Metrics&m,std::atomic<bool>&stop,unsigned wo
   a.sin_family=AF_INET;
   a.sin_port=htons(static_cast<std::uint16_t>(port));
   a.sin_addr.s_addr=htonl(INADDR_ANY);
-  if(bind(s,reinterpret_cast<sockaddr*>(&a),sizeof a)!=0||listen(s,64)!=0){close(s);return 1;}
+  if(bind(s,reinterpret_cast<sockaddr*>(&a),sizeof a)!=0||listen(s,4096)!=0){close(s);return 1;}
   int ep=epoll_create1(0),wake=eventfd(0,EFD_NONBLOCK);
   if(ep<0||wake<0){if(ep>=0)close(ep);if(wake>=0)close(wake);close(s);return 1;}
   epoll_event ev{};

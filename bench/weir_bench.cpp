@@ -63,6 +63,7 @@ struct Options {
 struct Stats {
   hdr_histogram* hist = nullptr;
   std::uint64_t ops = 0;
+  std::uint64_t err_replies = 0;
   std::uint64_t failed_conns = 0;
   std::int64_t warmup_ns = 0;
 };
@@ -170,6 +171,7 @@ struct ConnState {
   int fd = -1;
   bool established = false;
   bool failed = false;
+  bool counted = false;
   bool finishing = false;
   std::string outbox;
   std::string partial_line;
@@ -187,6 +189,28 @@ struct ClientContext {
   std::vector<ConnState> conns;
 };
 
+// A connection is counted as failed at most once, on the alive-to-failed
+// transition. Dead connections are closed through the transport immediately:
+// level-triggered error conditions (EPOLLERR/EPOLLHUP) keep re-reporting for
+// as long as the fd stays registered, which would inflate the failure count
+// and busy-loop the event loop.
+static void fail_conn(ClientContext& ctx, ConnState& c, const char* why,
+                      int err = 0) {
+  if (c.counted) return;
+  c.counted = true;
+  c.failed = true;
+  ++ctx.stats.failed_conns;
+  fprintf(stderr, "FAIL idx=%td sent=%llu recv=%llu why=%s errno=%d\n",
+          &c - ctx.conns.data(),
+          static_cast<unsigned long long>(c.sent),
+          static_cast<unsigned long long>(c.received), why, err);
+  if (c.handle != 0) {
+    ctx.io.close(c.handle);
+    c.handle = 0;
+    c.fd = -1;
+  }
+}
+
 std::int64_t now_ns() {
   return std::chrono::duration_cast<std::chrono::nanoseconds>(
              Clock::now().time_since_epoch())
@@ -201,14 +225,19 @@ void update_interest(ClientContext& ctx, ConnState& c) {
     interest = Read;
     if (!c.outbox.empty()) interest |= Write;
   }
-  if (c.handle != 0 && interest != 0) ctx.io.set_interest(c.handle, interest);
+  // Always push the interest through, including zero: a failed or finished
+  // connection must stop being polled or the transport keeps reporting its
+  // level-triggered error condition and the loop spins on it.
+  if (c.handle != 0) ctx.io.set_interest(c.handle, interest);
 }
 
 void try_send(ClientContext& ctx, ConnState& c) {
   if (c.failed || c.finishing) return;
-  while (c.outbox.empty() && c.sent - c.received < ctx.options.window &&
+  // Top the pipeline up to `window` frames in flight; whatever remains
+  // unsent stays in the outbox for the next writable pass.
+  while (c.sent - c.received < ctx.options.window &&
          now_ns() < ctx.deadline_ns) {
-    c.outbox = make_frame(c.sent + 1, ctx.options.payload);
+    c.outbox += make_frame(c.sent + 1, ctx.options.payload);
     c.sent_at.push_back(now_ns());
     ++c.sent;
   }
@@ -221,7 +250,7 @@ void try_send(ClientContext& ctx, ConnState& c) {
     }
     if (r < 0 && errno == EINTR) continue;
     if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
-    c.failed = true;
+    fail_conn(ctx, c, "write", errno);
     return;
   }
 }
@@ -236,15 +265,28 @@ void recv_replies(ClientContext& ctx, ConnState& c) {
       while (true) {
         const std::size_t nl = c.partial_line.find('\n', start);
         if (nl == std::string::npos) break;
+        const std::string line = c.partial_line.substr(0, nl);
         c.partial_line.erase(0, nl + 1);
-        if (!c.sent_at.empty()) {
-          const std::int64_t sent = c.sent_at.front();
-          c.sent_at.pop_front();
-          const std::int64_t latency = now_ns() - sent;
-          if (sent >= ctx.warmup_end_ns)
-            hdr_record_value(ctx.stats.hist, latency);
-          ++ctx.stats.ops;
+        const bool ok = line.rfind("OK ", 0) == 0;
+        const bool err = line.rfind("ERR ", 0) == 0;
+        if (ok || err) {
+          // Replies arrive one per sent frame (OK or in-band rejection), so
+          // each reply retires exactly one sent timestamp.
+          const std::int64_t sent = c.sent_at.empty() ? 0 : c.sent_at.front();
+          if (!c.sent_at.empty()) c.sent_at.pop_front();
+          if (sent >= ctx.warmup_end_ns) {
+            if (ok) {
+              hdr_record_value(ctx.stats.hist, now_ns() - sent);
+              ++ctx.stats.ops;
+            } else {
+              ++ctx.stats.err_replies;
+            }
+          }
           ++c.received;
+        } else {
+          // Anything else is a protocol anomaly; count it as a failed reply
+          // so malformed output cannot silently inflate throughput.
+          fail_conn(ctx, c, "anomaly");
         }
         start = 0;
       }
@@ -252,7 +294,7 @@ void recv_replies(ClientContext& ctx, ConnState& c) {
     }
     if (r < 0 && errno == EINTR) continue;
     if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
-    c.failed = true;
+    fail_conn(ctx, c, "read", errno);
     return;
   }
 }
@@ -265,7 +307,7 @@ weir::transport::RootTask run_load(ClientContext& ctx) {
     c.fd = socket(AF_INET, SOCK_STREAM, 0);
 #endif
     if (c.fd < 0) {
-      c.failed = true;
+      fail_conn(ctx, c, "socket", errno);
       continue;
     }
     sockaddr_in addr{};
@@ -274,11 +316,13 @@ weir::transport::RootTask run_load(ClientContext& ctx) {
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     const int r = connect(c.fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
     if (r != 0 && errno != EINPROGRESS) {
-      c.failed = true;
+      fail_conn(ctx, c, "connect", errno);
       continue;
     }
     c.handle = ctx.io.listen(c.fd, Write);
-    if (c.handle == 0) c.failed = true;
+    if (c.handle == 0) {
+      fail_conn(ctx, c, "listen");
+    }
   }
   while (true) {
     bool any_alive = false;
@@ -294,13 +338,17 @@ weir::transport::RootTask run_load(ClientContext& ctx) {
       for (auto& c : ctx.conns) {
         if (c.handle != event.handle) continue;
         if ((event.events & Error) != 0U) {
-          c.failed = true;
-          ++ctx.stats.failed_conns;
+          int error = 0;
+          socklen_t elen = sizeof(error);
+          if (getsockopt(c.fd, SOL_SOCKET, SO_ERROR, &error, &elen) != 0) {
+            fail_conn(ctx, c, "error_event_no_soerror", errno);
+          } else {
+            fail_conn(ctx, c, "error_event", error);
+          }
         }
         if ((event.events & PeerClosed) != 0U) {
           if (c.received < c.sent) {
-            c.failed = true;
-            ++ctx.stats.failed_conns;
+            fail_conn(ctx, c, "peer_closed");
           }
         }
         if ((event.events & Writable) != 0U) {
@@ -309,8 +357,7 @@ weir::transport::RootTask run_load(ClientContext& ctx) {
             socklen_t len = sizeof(error);
             if (getsockopt(c.fd, SOL_SOCKET, SO_ERROR, &error, &len) != 0 ||
                 error != 0) {
-              c.failed = true;
-              ++ctx.stats.failed_conns;
+              fail_conn(ctx, c, "connect_soerror", error);
             } else {
               c.established = true;
               try_send(ctx, c);
@@ -319,7 +366,11 @@ weir::transport::RootTask run_load(ClientContext& ctx) {
             try_send(ctx, c);
           }
         }
-        if ((event.events & Readable) != 0U) recv_replies(ctx, c);
+        if ((event.events & Readable) != 0U) {
+          recv_replies(ctx, c);
+          // Replies free pipeline slots: send more in the same pass.
+          try_send(ctx, c);
+        }
         update_interest(ctx, c);
       }
     }
@@ -450,8 +501,10 @@ int main(int argc, char** argv) {
   const int server_exit = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
   if (status_pipe >= 0) close(status_pipe);
 
+  const double measured_s =
+      std::max(wall_s - static_cast<double>(options.warmup_s), 0.001);
   const double throughput =
-      wall_s > 0 ? static_cast<double>(stats.ops) / wall_s : 0.0;
+      measured_s > 0 ? static_cast<double>(stats.ops) / measured_s : 0.0;
   const double p50 =
       static_cast<double>(hdr_value_at_percentile(hist, 50.0)) / 1000.0;
   const double p90 =
@@ -467,14 +520,17 @@ int main(int argc, char** argv) {
   char result[4096];
   snprintf(result, sizeof(result),
            "{\"backend\":\"%s\",\"connections\":%u,\"payload\":%u,"
-           "\"window\":%u,\"duration_s\":%.3f,\"ops\":%llu,"
+           "\"window\":%u,\"duration_s\":%.3f,\"warmup_s\":%u,"
+           "\"ops\":%llu,\"err_replies\":%llu,"
            "\"throughput_ops_s\":%.1f,\"p50_us\":%.3f,\"p90_us\":%.3f,"
            "\"p99_us\":%.3f,\"p999_us\":%.3f,\"max_us\":%.3f,"
            "\"rss_kb\":%llu,\"failed_conns\":%llu,\"server_exit\":%d}\n",
            json_escape(options.backend).c_str(), options.connections,
-           options.payload, options.window, wall_s,
-           static_cast<unsigned long long>(stats.ops), throughput, p50, p90,
-           p99, p999, max_us, static_cast<unsigned long long>(rss),
+           options.payload, options.window, wall_s, options.warmup_s,
+           static_cast<unsigned long long>(stats.ops),
+           static_cast<unsigned long long>(stats.err_replies), throughput,
+           p50, p90, p99, p999, max_us,
+           static_cast<unsigned long long>(rss),
            static_cast<unsigned long long>(stats.failed_conns), server_exit);
   if (!options.out_path.empty()) {
     std::FILE* f = std::fopen(options.out_path.c_str(), "w");
