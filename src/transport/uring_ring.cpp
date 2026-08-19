@@ -141,13 +141,15 @@ bool UringRing::submit(unsigned minimum_completions) {
 #endif
 }
 
-std::size_t UringRing::drain(const std::function<void(const Completion&)>& callback) {
+std::size_t UringRing::drain(
+    const std::function<void(const Completion&)>& callback,
+    std::size_t limit) {
 #ifdef __linux__
   if (!valid()) return 0;
   unsigned head = __atomic_load_n(impl_->cq_head, __ATOMIC_RELAXED);
   const unsigned tail = __atomic_load_n(impl_->cq_tail, __ATOMIC_ACQUIRE);
   std::size_t count = 0;
-  while (head != tail) {
+  while (head != tail && (limit == 0 || count < limit)) {
     const auto& cqe = impl_->cqes[head & *impl_->cq_mask];
     callback(Completion{cqe.user_data, cqe.res, cqe.flags});
     ++head;
@@ -157,6 +159,7 @@ std::size_t UringRing::drain(const std::function<void(const Completion&)>& callb
   return count;
 #else
   (void)callback;
+  (void)limit;
   return 0;
 #endif
 }

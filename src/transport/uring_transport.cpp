@@ -491,6 +491,23 @@ void UringTransport::run(RootTask task) {
       rng_state = value;
     }
   }
+  // Per-iteration drain cap: bounds how many completions one loop cycle
+  // retires. A cycle's work is the drain plus the server batch it hands
+  // over, so without a cap the cycle length grows with the number of ready
+  // connections (measured at 20,000 connections: ~675 completions per
+  // cycle, ~1.5 ms cycles, p999 ~12-19 ms). Capping the drain shortens
+  // cycles, but it also defers every event that misses the cap by a cycle,
+  // so it trades median latency and throughput for a small tail gain at
+  // scale (1k: p999 312 -> 429 us, throughput -12%; 20k: p999 18.6 ->
+  // 13.4 ms). Default is unlimited; WEIR_URING_DRAIN_CAP overrides for
+  // experiments (0 = unlimited).
+  std::size_t drain_cap = 0;
+  if (const char* value = std::getenv("WEIR_URING_DRAIN_CAP")) {
+    char* end = nullptr;
+    const auto parsed = std::strtoull(value, &end, 10);
+    if (end != value && *end == '\0' && parsed <= 65536)
+      drain_cap = static_cast<std::size_t>(parsed);
+  }
   auto rng = [&rng_state] {
     std::uint64_t x = rng_state;
     x ^= x << 13;
@@ -570,7 +587,8 @@ void UringTransport::run(RootTask task) {
           for (const auto& c : cancels) handler.completion(c);
         }
       } else {
-        impl_->ring.drain([&](const Completion& c) { handler.completion(c); });
+        impl_->ring.drain([&](const Completion& c) { handler.completion(c); },
+                          drain_cap);
       }
     } catch (...) {
       // A throwing posted callback must not escape the run loop: record the

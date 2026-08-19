@@ -32,7 +32,11 @@ class UringRing {
   io_uring_sqe* acquire(std::uint64_t user_data);
 #endif
   bool submit(unsigned minimum_completions = 0);
-  std::size_t drain(const std::function<void(const Completion&)>& callback);
+  // Drain completed entries into `callback`. `limit` bounds how many
+  // completions one call retires; the rest stay in the CQ for the next
+  // drain. Zero means unlimited.
+  std::size_t drain(const std::function<void(const Completion&)>& callback,
+                    std::size_t limit = 0);
 
  private:
   struct Impl;

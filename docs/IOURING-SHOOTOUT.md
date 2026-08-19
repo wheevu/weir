@@ -99,10 +99,23 @@ The 10,000- and 20,000-connection rows still need a clean re-run: the machine ra
 At 20,000 connections the slot fix trades differently: 4096 slots improve p50 (2.7 ms to 0.7 ms), admission (34% to 27% rejected), and memory (128 to 97 MB) but reduce throughput (112k to 73k ops/s) and leave p999 in the 12-22 ms range at every ring size from 256 to 8192.
 The server loop is not CPU-bound in any configuration (78-90% of one core), so the remaining 20,000-connection tail is a structural property of slot-based polling with a single drain loop, not a tuning miss.
 
+### The 20,000-connection tail: investigation result
+
+Follow-up measurements (2026-08-20, details in `results/bench/ring-ab.md`) rule out the tuning hypotheses:
+
+- A drain cap that bounds completions per loop cycle (256 or 1024) shortens cycles but defers every event that misses the cap by a cycle: at 20k, p999 improves only slightly (19.1 to 13.4 ms) while p50 degrades 1.2 to 4.4 ms and admission from 27% to 36% rejected.
+- A full-coverage ring (32768 slots, all connections polled at once) without a cap is catastrophic (p50 13.5 ms, throughput 24.6k): longer cycles dominate.
+- A same-moment control run at 20k on the degraded host shows epoll at p999 6.2 ms versus io_uring at 11.5 ms; the campaign's healthy-host epoll number was 3.85 ms, so the host inflates p999 by roughly 2.4 ms at this scale, leaving io_uring a real ~5 ms structural delta.
+- The trace instrumentation shows ~675 poll completions and ~1.5 ms per loop cycle at 20k with 4096 slots, with a 1024-entry trace ring saturating every cycle.
+
+The remaining suspect is the reply path: each reply needs a write-poll re-arm, which is a remove/re-arm round trip through the ring (two SQE generations plus their completions), and under a full ring that round trip can stall for multiple cycles.
+The evaluated options all trade one metric for another; the fix that would actually remove the round trip is a two-poll transport (a stable read poll per connection plus a separately armed write poll), which is a rework of the transport state machine and is deferred.
+Until then, io_uring is the right backend up to 10,000 connections; epoll is the right choice at 20,000.
+`WEIR_URING_DRAIN_CAP` (0 = unlimited, the default) exists for experiments but is not recommended.
+
 ## Open questions
 
-- What exactly delays the reply path at 20,000 connections (write-poll re-arm under a full ring is the leading hypothesis)?
-- Does a second run-loop thread or a dedicated completion thread change the 20,000-connection trade-off?
+- Does the two-poll transport rework (stable read poll plus separately armed write poll) close the 20,000-connection gap?
 - Absolute re-measurement of all rows on a clean host (AC power, no memory pressure) with the 4096-slot default.
 
 ## Planned figures
