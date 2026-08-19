@@ -179,7 +179,8 @@ int run_server(unsigned port,Log&lf,Metrics&m,std::atomic<bool>&stop,unsigned wo
       std::uint32_t events=es[static_cast<std::size_t>(i)].events;
       if(fd==wake){
         std::uint64_t x;
-        read(wake,&x,sizeof x);
+        const ssize_t drained=read(wake,&x,sizeof x);
+        (void)drained;
         std::lock_guard l(cm);
         while(!done.empty()){
            auto[cfd,g,seq,id,ok]=done.front();
@@ -258,8 +259,9 @@ int run_server(unsigned port,Log&lf,Metrics&m,std::atomic<bool>&stop,unsigned wo
              e.durable_completion=[&,fd,g,seq,id=e.id](bool ok){
                std::lock_guard l(cm);
                done.emplace_back(fd,g,seq,id,ok);
-              std::uint64_t x=1;
-              write(wake,&x,sizeof x);
+               std::uint64_t x=1;
+               const ssize_t notified=write(wake,&x,sizeof x);
+               (void)notified;
             };
              if(!pipe->try_submit(std::move(e))){
                --c.pending;

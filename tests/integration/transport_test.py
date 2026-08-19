@@ -43,6 +43,18 @@ def free_port():
     return port
 
 
+def backend():
+    return os.environ.get("WEIR_BACKEND")
+
+
+def metric(srv, name):
+    body = srv.fetch_metrics().split(b"\r\n\r\n", 1)[1].decode()
+    for line in body.splitlines():
+        if line.startswith(name + " "):
+            return int(line.split()[1])
+    return None
+
+
 class Server:
     def __init__(self, server_bin, inspect_bin, extra_env=None):
         self.port = free_port()
@@ -53,10 +65,14 @@ class Server:
         env = dict(os.environ)
         if extra_env:
             env.update(extra_env)
+        command = [server_bin, "--port", str(self.port),
+                   "--metrics-port", str(self.metrics_port),
+                   "--log", self.log_path]
+        backend = env.get("WEIR_BACKEND")
+        if backend:
+            command.extend(["--backend", backend])
         self.proc = subprocess.Popen(
-            [server_bin, "--port", str(self.port),
-             "--metrics-port", str(self.metrics_port),
-             "--log", self.log_path],
+            command,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             env=env, text=True)
         if not self.wait_ready(5.0):
@@ -375,17 +391,23 @@ def scenario_malformed_isolation(server_bin, inspect_bin):
 
 
 def scenario_slow_reader(server_bin, inspect_bin):
-    """A client that does not read ACKs for a while must get every ACK,
-    in order, without truncation or duplication.
+    """A client that does not read ACKs for a while must get a reply for
+    every event, in order, without truncation or duplication.
+
+    Every backend admits through a bounded queue, so under send-pressure
+    bursts the server may reject surplus events with an in-band "ERR queue"
+    reply instead of losing the event. The contract is: each event is
+    answered exactly once, replies arrive in order, and the durable log
+    holds exactly the accepted events. The client shrinks its receive window
+    so the server's ACK path must experience real send-buffer pressure.
 
     The event count is sized so the scenario also terminates quickly under
-    ASan, where flush-per-event persistence is several times slower. The
-    client shrinks its receive window so the server's ACK path must
-    experience real send-buffer pressure.
+    ASan, where flush-per-event persistence is several times slower.
     """
     srv = Server(server_bin, inspect_bin,
                  extra_env={"WEIR_TEST_SNDBUF": "8192"})
     count = 4000
+    ack_timeout = float(os.environ.get("WEIR_ACK_TIMEOUT", "60"))
     try:
         c = connect(srv.port, timeout=60)
         c.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
@@ -396,11 +418,33 @@ def scenario_slow_reader(server_bin, inspect_bin):
             c.sendall(buf)
             time.sleep(0.01)  # pace so the server can buffer completions
         time.sleep(0.8)  # deliberately not reading while ACKs accumulate
-        ids = recv_ack_ids(c, count, timeout=60)
+        deadline = time.monotonic() + ack_timeout
+        data = b""
+        while data.count(b"\n") < count and time.monotonic() < deadline:
+            data += c.recv(1 << 16)
         c.close()
-        assert len(ids) == count and len(set(ids)) == count, len(ids)
-        assert ids == sorted(ids), "ACK order must be preserved"
-        assert "records=%d" % count in srv.inspect_log(), srv.inspect_log()
+        lines = data.splitlines()
+        ok = [int(line.split()[1]) for line in lines if line.startswith(b"OK ")]
+        err = lines.count(b"ERR queue")
+        if len(ok) + err != count:
+            raise AssertionError(
+                "expected %d replies, got %d lines (OK=%d ERR=%d), "
+                "rejected=%s overload=%s"
+                % (count, len(lines), len(ok), err,
+                   metric(srv, "weir_rejected_total"),
+                   metric(srv, "weir_overload_total")))
+        # Replies must arrive in order: the server assigns ids 1..count and
+        # every event (accepted or rejected) advances the sequence, so each
+        # OK id must equal its 1-based position among all reply lines.
+        expected_id = 1
+        for line in lines:
+            if line.startswith(b"OK "):
+                assert line == (b"OK " + str(expected_id).encode()), line
+            else:
+                assert line == b"ERR queue", line
+            expected_id += 1
+        assert len(ok) > 0, "%s backend admitted no events" % backend()
+        assert "records=%d" % len(ok) in srv.inspect_log(), srv.inspect_log()
     finally:
         srv.stop()
 

@@ -1,5 +1,6 @@
 build*/
 bench/results.*
+results/
 *.log
 .DS_Store
 
