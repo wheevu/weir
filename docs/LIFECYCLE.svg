@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="330" viewBox="0 0 1200 330" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="350" viewBox="0 0 1200 350" role="img" aria-labelledby="title desc">
   <title id="title">Weir event lifecycle</title>
   <desc id="desc">An event is received, validated, queued for persistence, appended and flushed, acknowledged, queued for processing, and processed. Invalid input is dropped and persistence failure returns an error without processing.</desc>
   <defs>
@@ -23,7 +23,7 @@
     </style>
   </defs>
 
-  <rect class="canvas" width="1200" height="330"/>
+  <rect class="canvas" width="1200" height="350"/>
   <text class="title" x="35" y="46">Event lifecycle</text>
   <text class="subtitle" x="35" y="72">Persistence comes before processing, but the response is still queued on the network loop.</text>
 
@@ -83,6 +83,6 @@
   </g>
   <path class="error" d="M 260 189 V 240"/>
 
-  <text class="note" x="35" y="320">Invalid input is dropped before admission.</text>
-  <text class="note" x="700" y="320">Baseline boundary: userspace flush, not fdatasync.</text>
+  <text class="note" x="35" y="330">Invalid input is dropped before admission.</text>
+  <text class="note" x="700" y="330">Baseline boundary: userspace flush, not fdatasync.</text>
 </svg>

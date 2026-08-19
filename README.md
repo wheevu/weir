@@ -2,7 +2,6 @@
 
 Weir is a small Linux-first C++20 event-ingestion service.
 
-**C++20** · **Linux** · **epoll** · **TCP** · **bounded concurrency** · **append-only persistence**
 
 ![Weir architecture](docs/ARCHITECTURE.svg)
 
@@ -34,7 +33,7 @@ Stable-storage durability and crash-recovery guarantees are still under developm
 
 Still in progress: `fdatasync` durability, process-level crash recovery, Prometheus/Grafana deployment, full observability, and performance characterization.
 
-## 30-second overview
+## Overview
 
 1. A TCP client sends length-delimited `WR01` frames.
 2. The parser tolerates arbitrary read fragmentation and rejects bad checksums.

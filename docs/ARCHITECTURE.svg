@@ -78,8 +78,8 @@
     <text class="label" x="95" y="36">ACK queued</text>
   </g>
   <path class="flow" d="M 810 180 V 138"/>
-  <rect class="tag" x="824" y="145" width="80" height="22" rx="11"/>
-  <text class="tag-text" x="864" y="160">success</text>
+  <rect class="tag" x="824" y="150" width="80" height="22" rx="11"/>
+  <text class="tag-text" x="864" y="165">success</text>
 
   <g class="node" transform="translate(245 385)">
     <rect width="190" height="86"/>
@@ -88,13 +88,13 @@
     <text class="detail" x="95" y="74">shared counters</text>
   </g>
   <g class="node" transform="translate(480 385)">
-    <rect width="190" height="86"/>
+    <rect width="190" height="90"/>
     <text class="number" x="18" y="25">M2</text>
     <text class="label" x="95" y="52">metrics endpoint</text>
     <text class="detail" x="95" y="74">HTTP :9100</text>
   </g>
   <g class="node" transform="translate(715 385)">
-    <rect width="190" height="86"/>
+    <rect width="190" height="90"/>
     <text class="number" x="18" y="25">M3</text>
     <text class="label" x="95" y="52">Prometheus</text>
     <text class="detail" x="95" y="74">scrape target</text>
@@ -104,5 +104,5 @@
   <path class="metrics" d="M 670 428 H 715"/>
 
   <text class="note-strong" x="40" y="520">Current baseline:</text>
-  <text class="note" x="166" y="520">userspace flush precedes ACK generation and processing admission.</text>
+  <text class="note" x="166" y="520"> userspace flush precedes ACK generation and processing admission.</text>
 </svg>
