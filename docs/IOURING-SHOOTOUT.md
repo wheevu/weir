@@ -70,8 +70,9 @@ The transport choice shows up elsewhere.
 - io_uring rejects fewer events than epoll or coroutine at every connection level (34-42% vs 48-53%).
   Its admission behavior is the closest to the pipeline's real capacity.
 - io_uring uses the least memory: about 6.5 KB per connection at 20,000 connections versus 8.4 KB for epoll and 8.6 KB for coroutine.
-- io_uring pays with its latency tail: p999 is 10-40x worse than epoll/coroutine (2.6-13.3 ms versus 0.2-4.1 ms), and the observed maximum is 10-19 ms versus 0.2-5 ms.
-  The tail is stable across all three samples at every level, so it is a property of the backend under saturation, not noise.
+- io_uring pays with its latency tail: as measured with the original 256-slot ring, p999 is 10-40x worse than epoll/coroutine (2.6-13.3 ms versus 0.2-4.1 ms), and the observed maximum is 10-19 ms versus 0.2-5 ms.
+  The tail was stable across all three samples at every level, so it is a property of the backend under saturation, not noise.
+  Its cause and fix are in the next section.
 
 ## Latency tail: cause and fix (2026-08-20)
 
