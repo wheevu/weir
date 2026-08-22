@@ -10,6 +10,8 @@ It runs one of three nonblocking TCP transports: a legacy `epoll` server, a C++2
 
 Stable-storage durability and crash-recovery guarantees are still under development.
 
+![Weir transport backends](docs/TRANSPORTS.svg)
+
 ## Quickstart
 
 Requirements: CMake 3.20+ and a C++20 compiler.
@@ -35,12 +37,17 @@ Linux provides the nonblocking TCP server (epoll, coroutine, or io_uring backend
 ## What it demonstrates
 
 - Linux networking with nonblocking TCP across three backends: legacy `epoll`, C++20 coroutines over `epoll`, and coroutines over `io_uring` (`--backend epoll|coroutine|io_uring`)
-- Incremental framing over a byte stream
+- Incremental framing over a byte stream with **linear-time parser resync** (cursor-based, one compact per feed)
 - Bounded concurrent queues with explicit capacity limits
 - Persistence before processing acknowledgement
 - Worker ownership and coordinated shutdown
 - Append-only recovery and replay
 - Prometheus-compatible metrics and structured logs
+- **Noisy-neighbor isolation**: concurrent parser flood + healthy client with bounded ACK deadline
+
+![Weir durability boundary](docs/DURABILITY.svg)
+
+![Weir observability](docs/OBSERVABILITY.svg)
 
 ## Benchmarks
 

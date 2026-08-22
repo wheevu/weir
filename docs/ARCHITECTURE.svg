@@ -6,7 +6,7 @@
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#93643a"/>
     </marker>
     <marker id="arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M 0 0 L 10 5 L 0 10 z" fill="#52727b"/>
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#3f7d84"/>
     </marker>
     <style>
       .canvas { fill: #fbfaf7; }
@@ -17,7 +17,7 @@
       .node .detail { fill: #69727a; font: 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; text-anchor: middle; }
       .node .number { fill: #93643a; font: 700 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
       .flow { fill: none; stroke: #93643a; stroke-width: 2.5; marker-end: url(#arrow); }
-      .metrics { fill: none; stroke: #52727b; stroke-width: 2.5; marker-end: url(#arrow-muted); }
+      .metrics { fill: none; stroke: #3f7d84; stroke-width: 2.5; marker-end: url(#arrow-muted); }
       .branch { fill: none; stroke: #93643a; stroke-width: 2; stroke-dasharray: 6 6; marker-end: url(#arrow); }
       .note { fill: #4f5b63; font: 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
       .note-strong { fill: #20262d; font: 700 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }

@@ -13,8 +13,21 @@ int main(){
  weir::Event e{42,"payload",{},{}}; auto b=weir::encode(e); weir::Parser p;
  std::vector<std::uint8_t> golden{0x57,0x52,0x30,0x31,0,0,0,0,0,0,0,42,0,0,0,7,'p','a','y','l','o','a','d',0x33,0x0f,0x77,0xa5}; check(b==golden,"golden frame");
  for(std::size_t i=0;i<b.size();++i){weir::Parser fragmented;auto a=fragmented.feed(b.data(),i);check(a.empty(),"fragment prefix");a=fragmented.feed(b.data()+i,b.size()-i);check(a.size()==1&&a[0].id==42,"fragment decode");}
- auto bad=b; bad.back()^=1; check(p.feed(bad.data(),bad.size()).empty(),"bad checksum");
-  std::vector<std::uint8_t> noise{0,1,2,3,4}; noise.insert(noise.end(),b.begin(),b.end()); auto recovered=p.feed(noise.data(),noise.size()); check(recovered.size()==1,"noise recovery");
+  auto bad=b; bad.back()^=1; check(p.feed(bad.data(),bad.size()).empty(),"bad checksum");
+   std::vector<std::uint8_t> noise{0,1,2,3,4}; noise.insert(noise.end(),b.begin(),b.end()); auto recovered=p.feed(noise.data(),noise.size()); check(recovered.size()==1,"noise recovery");
+   {
+     // High-volume coalesced bad-checksum frames must not cost a vector front
+     // erase per frame. Thousands of complete bad frames are fed in one call
+     // ahead of one valid frame; the parser must skip every bad frame and still
+     // decode the trailing valid one. A per-frame front-erase makes this O(n^2)
+     // and pathological; the single-compaction cursor keeps it linear.
+     weir::Parser flood;
+     std::vector<std::uint8_t> buf;
+     for(int i=0;i<50000;++i){buf.insert(buf.end(),bad.begin(),bad.end());}
+     buf.insert(buf.end(),b.begin(),b.end());  // one trailing valid frame
+     auto evs=flood.feed(buf.data(),buf.size());
+     check(evs.size()==1&&evs[0].id==42,"coalesced bad-checksum frames skip then valid");
+   }
   {
     // Oversized length poisons the parser instead of throwing, so valid
     // frames decoded before the bad one are returned and not lost.
@@ -27,6 +40,36 @@ int main(){
     weir::Parser mixed_p;
     evs=mixed_p.feed(mixed.data(),mixed.size());
     check(evs.size()==1&&evs[0].id==42&&mixed_p.bad(),"valid events survive oversized tail");
+  }
+  // Linear resync must survive large noise without the quadratic blowup the
+  // byte-at-a-time erase suffered. Zeros never begin a magic, so the whole
+  // noise must be scrolled past and the trailing valid frame recovered.
+  {
+    weir::Parser big;
+    std::vector<std::uint8_t> noised(300000,0x00);
+    noised.insert(noised.end(),b.begin(),b.end());
+    auto evs=big.feed(noised.data(),noised.size());
+    check(evs.size()==1&&evs[0].id==42,"large noise recovery");
+  }
+  // A magic split across two feeds must still decode once the suffix arrives.
+  {
+    weir::Parser split;
+    std::vector<std::uint8_t> head(b.begin(),b.begin()+3); // "WR0"
+    std::vector<std::uint8_t> tail(b.begin()+3,b.end());    // "1" + rest
+    check(split.feed(head.data(),head.size()).empty(),"split magic prefix silent");
+    auto evs=split.feed(tail.data(),tail.size());
+    check(evs.size()==1&&evs[0].id==42,"magic split across feeds recovers");
+  }
+  // Garbage between two valid frames must not swallow either frame.
+  {
+    weir::Parser g;
+    weir::Event a{1,"alpha",{},{}}; auto ba=weir::encode(a);
+    weir::Event c{2,"beta",{},{}};  auto bc=weir::encode(c);
+    std::vector<std::uint8_t> buf(ba.begin(),ba.end());
+    buf.insert(buf.end(),4096,0x00); // no-magic garbage
+    buf.insert(buf.end(),bc.begin(),bc.end());
+    auto evs=g.feed(buf.data(),buf.size());
+    check(evs.size()==2&&evs[0].id==1&&evs[1].id==2,"garbage between valid frames");
   }
  auto path=std::filesystem::temp_directory_path()/("weir-test-"+std::to_string(::getpid())+"-"+std::to_string(std::hash<std::thread::id>{}(std::this_thread::get_id()))+"-"+std::to_string(std::rand())+".log"); std::filesystem::remove(path);
  {weir::Log l(path);check(l.append(e),"append");}

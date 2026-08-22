@@ -17,6 +17,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -390,6 +391,159 @@ def scenario_malformed_isolation(server_bin, inspect_bin):
         srv.stop()
 
 
+def scenario_parser_flood_isolation(server_bin, inspect_bin):
+    """A client flooding malformed parser traffic (the noisy neighbor) must
+    not delay or drop ACKs for a separate client's valid events.
+
+    The flood runs in its own background thread that streams continuously while
+    the healthy client submits real events on the main thread, so the server's
+    single epoll thread is genuinely interleaving both peers at once rather than
+    draining the flood in a quiet gap between sequential sends. The flood pushes
+    a large no-magic byte stream and ends with an oversized length that poisons
+    only its own parser. A real (linear) resync keeps the epoll thread free so
+    the quiet neighbor's valid events are still acknowledged in order and made
+    durable. A quadratic resync would pin the single epoll thread inside the
+    flood's feed() and starve the quiet neighbor past its ACK deadline.
+
+    The healthy client's full ACK batch must arrive inside a bounded deadline,
+    which proves the flood never starved it.
+    """
+    srv = Server(server_bin, inspect_bin)
+    # Fastened to one outer try/finally so a failure anywhere in the scenario
+    # body, including the readiness barrier, still unblocks, joins, and closes
+    # the flood before being reported. The flood must never survive a failed
+    # scenario as an orphan thread or socket.
+    flood_done = threading.Event()
+    # Set only after the flood socket has connected and pushed a substantial
+    # first burst, so the scenario never races ahead and lets the healthy
+    # client run before the noisy neighbor is provably live.
+    flood_live = threading.Event()
+    # Standard-library channel for surfacing background-thread failures into
+    # the main scenario thread instead of swallowing them.
+    flood_error = []
+    flood_thread = None
+    healthy_socket = None
+    # Exception raised by the scenario body (readiness barrier, healthy
+    # traffic, or post-conditions). Re-raised after cleanup unless an explicit
+    # flood/cleanup failure supersedes it.
+    body_error = None
+    ids = None
+    elapsed = None
+    try:
+        good = connect(srv.port)
+        healthy_socket = good
+        expected = 10
+        # Flood streams on a dedicated thread so it is live for the whole
+        # window in which the healthy client sends and receives its ACKs.
+
+        def flood():
+            try:
+                f = connect(srv.port)
+                # Short timeout makes the writer interruptible: a stalled send
+                # raises socket.timeout instead of blocking the shutdown
+                # forever, and we treat that as a retry while the flood is
+                # still active (see below). Any other socket error before
+                # shutdown is a genuine flood failure to record.
+                f.settimeout(0.2)
+                try:
+                    # Substantial first burst: all-zero bytes that never begin a
+                    # magic sequence. This must be on the wire (and acknowledged
+                    # by the OS socket layer) before we release the scenario to
+                    # start healthy traffic. A socket.timeout here just means the
+                    # send buffer is momentarily full: retry rather than fail.
+                    for _ in range(10):
+                        try:
+                            f.sendall(bytes(20000))
+                        except socket.timeout:
+                            continue
+                    flood_live.set()
+                    while not flood_done.is_set():
+                        try:
+                            f.sendall(bytes(20000))  # all zeros: no magic
+                        except socket.timeout:
+                            # Buffer full / peer slow: stay live and retry
+                            # rather than treating a timeout as a flood failure.
+                            continue
+                except OSError as exc:
+                    # A socket error before we signaled shutdown is an
+                    # unexpected flood failure: the server dropped the noisy
+                    # neighbor on its own, which this scenario must not allow.
+                    # Record it so the main thread turns it into a real test
+                    # failure instead of silently suppressing it. A socket
+                    # error after flood_done is set is expected (shutdown).
+                    if not flood_done.is_set():
+                        flood_error.append(exc)
+                finally:
+                    # Final poison payload: oversized length poisons only this
+                    # parser. Sent even if the streaming loop was interrupted,
+                    # and tolerated if the connection is already gone.
+                    try:
+                        f.sendall(b"WR01" + struct.pack(">QI", 1, 1024 * 1024 + 1)
+                                  + b"\0" * 4)
+                    except OSError:
+                        pass
+                    f.close()
+            except BaseException as exc:  # capture any background failure
+                flood_error.append(exc)
+
+        flood_thread = threading.Thread(target=flood, daemon=True)
+        flood_thread.start()
+        # Prove the flood connection has connected and sent a substantial first
+        # burst before healthy traffic starts.
+        if not flood_live.wait(timeout=5.0):
+            if flood_error:
+                raise RuntimeError("flood thread failed before going live: %r"
+                                   % (flood_error[0],))
+            raise RuntimeError("flood connection never became live")
+        # Submit the healthy client's valid events while the flood streams.
+        # The 5-second ACK deadline is preserved: a quadratic resync would pin
+        # the epoll thread inside the flood's feed() and starve the quiet
+        # neighbor past this bounded window.
+        start = time.monotonic()
+        for i in range(expected):
+            good.sendall(make_frame(9100 + i, b"good-%d" % i))
+        ack_deadline = start + 5.0
+        timeout = max(0.1, ack_deadline - time.monotonic())
+        ids = recv_ack_ids(good, expected, timeout=timeout)
+        elapsed = time.monotonic() - start
+        assert ids == list(range(1, expected + 1)), ids
+        assert elapsed <= 5.0, ("healthy ACKs took %.2fs, expected < 5.0s"
+                                % elapsed)
+        assert "records=%d" % expected in srv.inspect_log(), srv.inspect_log()
+    except BaseException as exc:  # noqa: BLE001 - capture to re-raise post-cleanup
+        body_error = exc
+    finally:
+        # Always runs for every exit path above: signal the flood to stop, join
+        # it, and close both sockets so no orphan thread or connection leaks.
+        # Errors here are collected rather than raised immediately, so the server
+        # is always stopped first (see the outer finally) and nothing leaks when
+        # cleanup itself raises.
+        flood_done.set()
+        if flood_thread is not None:
+            flood_thread.join(timeout=2)
+        if healthy_socket is not None:
+            healthy_socket.close()
+    # Server shutdown runs on every path, including when flood cleanup surfaced
+    # a failure, so the scenario never orphans a server process.
+    try:
+        if flood_error:
+            # A flood-thread failure supersedes the healthy-path result, but the
+            # healthy failure is folded into the message so it is not silently
+            # masked by the noise of the flood.
+            msg = "flood thread failed: %r" % (flood_error[0],)
+            if body_error is not None:
+                msg += " (scenario also failed: %r)" % (body_error,)
+            raise RuntimeError(msg)
+        # Cleanup itself failed: the flood did not terminate after we signaled
+        # it. Report that rather than masking it behind the scenario error.
+        if flood_thread is not None:
+            assert not flood_thread.is_alive(), "flood thread did not terminate"
+        if body_error is not None:
+            raise body_error
+    finally:
+        srv.stop()
+
+
 def scenario_slow_reader(server_bin, inspect_bin):
     """A client that does not read ACKs for a while must get a reply for
     every event, in order, without truncation or duplication.
@@ -499,6 +653,7 @@ SCENARIOS = {
     "client_churn": scenario_client_churn,
     "mid_frame_disconnect": scenario_mid_frame_disconnect,
     "malformed_isolation": scenario_malformed_isolation,
+    "parser_flood_isolation": scenario_parser_flood_isolation,
     "slow_reader": scenario_slow_reader,
     "overload_admission": scenario_overload_admission,
 }

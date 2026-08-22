@@ -28,15 +28,49 @@ std::vector<Event> Parser::feed(const std::uint8_t*p,std::size_t n){
   if(bad_)return {};
   b_.insert(b_.end(),p,p+n);
   std::vector<Event>r;
-  while(b_.size()>=20){
-    if(get32(b_,0)!=0x57523031u){b_.erase(b_.begin());continue;}
-    auto len=get32(b_,12);
-    if(len>1u<<20){bad_=true;break;}
-    if(b_.size()<20+len)break;
-    std::string s(b_.begin()+16,b_.begin()+16+len);
-    if(checksum(s)==get32(b_,16+len))r.push_back({get64(b_,4),std::move(s),{},{} });
-    b_.erase(b_.begin(),b_.begin()+20+len);
+  static constexpr std::uint8_t magic[4]={0x57,0x52,0x30,0x31};
+  // Parse with a local cursor over the buffered bytes. Bytes are never shifted
+  // out of the vector while parsing: a bad-checksum frame is skipped by simply
+  // advancing the cursor, not by erasing the vector front. The consumed prefix
+  // is compacted at most once, after the whole feed is scanned, so K bad frames
+  // cost O(total) instead of O(K * total) from K front-erase shifts.
+  std::size_t pos=0;
+  const std::size_t total=b_.size();
+  while(pos<total){
+    // Resync: locate the first complete magic at or after the cursor.
+    std::size_t found=total;
+    for(std::size_t j=pos;j+4<=total;++j){
+      if(b_[j]==magic[0]&&b_[j+1]==magic[1]&&b_[j+2]==magic[2]&&b_[j+3]==magic[3]){
+        found=j;break;
+      }
+    }
+    if(found==total){
+      // No complete magic ahead. Keep at most a trailing run that is a prefix of
+      // the magic (up to "WR0") so a magic split across two feeds is preserved
+      // rather than discarded; garbage before it is dropped when we compact.
+      std::size_t keep=0;
+      if(total>=1&&b_[total-1]==magic[0])keep=1;
+      if(total>=2&&b_[total-2]==magic[0]&&b_[total-1]==magic[1])keep=2;
+      if(total>=3&&b_[total-3]==magic[0]&&b_[total-2]==magic[1]&&b_[total-1]==magic[2])keep=3;
+      pos=total-keep;
+      break;
+    }
+    // Garbage between the cursor and the magic is skipped by advancing the cursor.
+    pos=found;
+    // A full header is required before the declared length can be trusted.
+    if(total-pos<20)break;
+    auto len=get32(b_,pos+12);
+    if(len>1u<<20){bad_=true;break;}  // oversized length poisons only this parser
+    if(total-pos<20+len)break;          // wait for the rest of a fragmented frame
+    std::string s(b_.begin()+static_cast<std::ptrdiff_t>(pos+16),
+                  b_.begin()+static_cast<std::ptrdiff_t>(pos+16+len));
+    if(checksum(s)==get32(b_,pos+16+len))r.push_back({get64(b_,pos+4),std::move(s),{},{} });
+    // Whether or not the checksum matched, this frame is consumed and parsing
+    // continues. A bad checksum skips the frame without poisoning the parser.
+    pos+=20+len;
   }
+  // Compact the consumed prefix at most once for the entire feed.
+  if(pos>0)b_.erase(b_.begin(),b_.begin()+static_cast<std::ptrdiff_t>(pos));
   return r;
 }
 Log::Log(std::filesystem::path p):path_(std::move(p)),out_(path_,std::ios::app|std::ios::binary){}
