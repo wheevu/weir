@@ -67,6 +67,8 @@ if(WEIR_LINUX_INTEGRATION_TESTS)
               --inspect $<TARGET_FILE:weir-inspect-log>)
     set_tests_properties(weir-uring-transport-integration PROPERTIES TIMEOUT 180)
   endif()
-  add_test(NAME weir-crash-recovery COMMAND ${CMAKE_SOURCE_DIR}/scripts/crash-recovery.sh)
+  add_test(NAME weir-crash-recovery
+    COMMAND ${CMAKE_COMMAND} -E env WEIR_BUILD_DIR=${CMAKE_BINARY_DIR}
+            ${CMAKE_SOURCE_DIR}/scripts/crash-recovery.sh)
   set_tests_properties(weir-crash-recovery PROPERTIES TIMEOUT 20)
 endif()
